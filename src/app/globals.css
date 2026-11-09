@@ -1,0 +1,288 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0e1013;
+  --panel: #16191e;
+  --panel2: #1c2027;
+  --line: #2a2f38;
+  --ink: #ebe8e2;
+  --dim: #8d939c;
+  --tally: #ff3b30;
+  --am: #f2b33d;
+  --pm: #45c1d6;
+  --nt: #a093ff;
+  --ok: #3ecf8e;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Sukhumvit Set", "Thonburi", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.mono {
+  font-family: "SF Mono", ui-monospace, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.dim {
+  color: var(--dim);
+}
+
+.tab {
+  color: var(--dim);
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--ink);
+  border-color: var(--tally);
+}
+
+.tab:focus-visible,
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--pm);
+  outline-offset: 2px;
+}
+
+table.schedule-grid {
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+}
+
+.schedule-grid th,
+.schedule-grid td {
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+
+.schedule-grid th:first-child,
+.schedule-grid td:first-child {
+  border-left: 1px solid var(--line);
+}
+
+.schedule-grid thead th {
+  border-top: 1px solid var(--line);
+}
+
+.today-cell {
+  background: rgba(255, 59, 48, 0.055);
+}
+
+.today-head {
+  box-shadow: inset 0 3px 0 var(--tally);
+}
+
+.chip {
+  display: block;
+  border-left: 3px solid;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--panel2);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.c-am {
+  border-color: var(--am);
+}
+.c-gold {
+  border-color: #facc15;
+}
+.c-orange {
+  border-color: #fb923c;
+}
+.c-sp {
+  border-color: var(--tally);
+  background: rgba(255, 59, 48, 0.11);
+}
+.c-rose {
+  border-color: #fb7185;
+}
+.c-pink {
+  border-color: #f472b6;
+}
+.c-fuchsia {
+  border-color: #e879f9;
+}
+.c-nt {
+  border-color: var(--nt);
+}
+.c-indigo {
+  border-color: #6366f1;
+}
+.c-blue {
+  border-color: #3b82f6;
+}
+.c-sky {
+  border-color: #38bdf8;
+}
+.c-pm {
+  border-color: var(--pm);
+}
+.c-teal {
+  border-color: #2dd4bf;
+}
+.c-emerald {
+  border-color: #3ecf8e;
+}
+.c-lime {
+  border-color: #a3e635;
+}
+
+.od-badge {
+  position: relative;
+}
+
+.od-badge::after {
+  content: "OD";
+  position: absolute;
+  top: 3px;
+  right: 5px;
+  font-size: 11px;
+  color: var(--tally);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.field {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--ink);
+}
+
+.btn {
+  background: var(--ink);
+  color: var(--bg);
+  border-radius: 6px;
+  padding: 7px 14px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 14px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.btn-ghost:hover {
+  background: var(--panel2);
+}
+
+.drag-chip {
+  cursor: grab;
+}
+
+.drag-chip[aria-pressed="true"] {
+  outline: 2px solid var(--tally);
+  outline-offset: 1px;
+}
+
+.drop-ok {
+  box-shadow: inset 0 0 0 2px var(--ok);
+  background: rgba(62, 207, 142, 0.08);
+}
+
+.drop-warn {
+  box-shadow: inset 0 0 0 2px var(--am);
+  background: rgba(242, 179, 61, 0.07);
+}
+
+.drop-hover {
+  background: rgba(62, 207, 142, 0.2) !important;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tally-pulse {
+    animation: tallyPulse 2s infinite;
+  }
+  @keyframes tallyPulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+}
+
+.print-only {
+  display: none;
+}
+
+@page {
+  size: A4 landscape;
+  margin: 8mm;
+}
+
+@media print {
+  :root {
+    --bg: #ffffff;
+    --panel: #ffffff;
+    --panel2: #f8fafc;
+    --line: #cbd5e1;
+    --ink: #0f172a;
+    --dim: #475569;
+  }
+
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    font-size: 11px;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  .print-container {
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  table.schedule-grid {
+    min-width: 0 !important;
+    width: 100% !important;
+    font-size: 11px !important;
+  }
+
+  .schedule-grid th,
+  .schedule-grid td {
+    padding: 4px 5px !important;
+  }
+
+  .chip {
+    font-size: 11px !important;
+    padding: 3px 6px !important;
+  }
+}

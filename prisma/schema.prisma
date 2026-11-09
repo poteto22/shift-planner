@@ -1,0 +1,154 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ShiftKind {
+  NORMAL
+  SPECIAL
+}
+
+enum OverrideMode {
+  REPLACE
+  ADD
+  OFF
+}
+
+model Team {
+  id                 Int                 @id @default(autoincrement())
+  name               String              @unique
+  sortOrder          Int                 @default(0) @map("sort_order")
+  active             Boolean             @default(true)
+  employees          Employee[]
+  planEntries        PlanEntry[]
+  specialAssignments SpecialAssignment[]
+  overrides          Override[]
+
+  @@map("teams")
+}
+
+model Position {
+  id        Int        @id @default(autoincrement())
+  name      String     @unique
+  sortOrder Int        @default(0) @map("sort_order")
+  isLead    Boolean    @default(false) @map("is_lead")
+  isSpecial Boolean    @default(false) @map("is_special")
+  employees Employee[]
+
+  @@map("positions")
+}
+
+model Employee {
+  id         Int      @id @default(autoincrement())
+  firstName  String   @map("first_name")
+  lastName   String   @map("last_name")
+  phone      String   @default("")
+  positionId Int      @map("position_id")
+  teamId     Int?     @map("team_id")
+  active     Boolean  @default(true)
+  position   Position @relation(fields: [positionId], references: [id])
+  team       Team?    @relation(fields: [teamId], references: [id])
+
+  @@map("employees")
+}
+
+model ShiftType {
+  id           Int           @id @default(autoincrement())
+  code         String        @unique
+  name         String
+  startTime    String        @map("start_time") // "HH:mm"
+  endTime      String        @map("end_time")   // "HH:mm"
+  kind         ShiftKind     @default(NORMAL)
+  color        String        @default("am")     // "am" | "pm" | "nt" | "sp"
+  active       Boolean       @default(true)
+  planEntries  PlanEntry[]
+  specialSlots SpecialSlot[]
+  overrides    Override[]
+
+  @@map("shift_types")
+}
+
+model MasterPlan {
+  id            Int           @id @default(autoincrement())
+  version       Int           @unique
+  effectiveFrom DateTime      @db.Date @map("effective_from")
+  note          String        @default("")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  entries       PlanEntry[]
+  specialSlots  SpecialSlot[]
+
+  @@index([effectiveFrom])
+  @@map("master_plans")
+}
+
+model PlanEntry {
+  id          Int        @id @default(autoincrement())
+  planId      Int        @map("plan_id")
+  dayOfWeek   Int        @map("day_of_week") // 0 = Sun ... 6 = Sat
+  teamId      Int?       @map("team_id")
+  isCam3      Boolean    @default(false) @map("is_cam3")
+  employeeId  Int?       @map("employee_id")
+  shiftTypeId Int        @map("shift_type_id")
+  plan        MasterPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  team        Team?      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  shiftType   ShiftType  @relation(fields: [shiftTypeId], references: [id])
+
+  @@unique([planId, dayOfWeek, teamId, isCam3, employeeId])
+  @@map("plan_entries")
+}
+
+model SpecialSlot {
+  id          Int                 @id @default(autoincrement())
+  planId      Int                 @map("plan_id")
+  dayOfWeek   Int                 @map("day_of_week") // 0 = Sun ... 6 = Sat
+  shiftTypeId Int                 @map("shift_type_id")
+  plan        MasterPlan          @relation(fields: [planId], references: [id], onDelete: Cascade)
+  shiftType   ShiftType           @relation(fields: [shiftTypeId], references: [id])
+  assignments SpecialAssignment[]
+
+  @@map("special_slots")
+}
+
+model SpecialAssignment {
+  id       Int         @id @default(autoincrement())
+  slotId   Int         @map("slot_id")
+  workDate DateTime    @db.Date @map("work_date")
+  teamId   Int         @map("team_id")
+  slot     SpecialSlot @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  team     Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([slotId, workDate])
+  @@index([workDate])
+  @@map("special_assignments")
+}
+
+model Override {
+  id          Int          @id @default(autoincrement())
+  workDate    DateTime     @db.Date @map("work_date")
+  teamId      Int?         @map("team_id")
+  isCam3      Boolean      @default(false) @map("is_cam3")
+  employeeId  Int?         @map("employee_id")
+  mode        OverrideMode
+  shiftTypeId Int?         @map("shift_type_id")
+  customStart String?      @map("custom_start")
+  customEnd   String?      @map("custom_end")
+  reason      String       @default("")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  team        Team?        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  shiftType   ShiftType?   @relation(fields: [shiftTypeId], references: [id])
+
+  @@index([workDate])
+  @@map("overrides")
+}
+
+model WeekSnapshot {
+  weekStart   DateTime @id @db.Date @map("week_start")
+  data        Json
+  finalizedAt DateTime @default(now()) @map("finalized_at")
+
+  @@map("week_snapshots")
+}
