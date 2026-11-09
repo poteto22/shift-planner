@@ -25,6 +25,7 @@ import {
   logoutAdminAction,
   moveTeamOrderAction,
   removeEmployeeAction,
+  removeShiftTypeAction,
   saveEmployeeAction,
   saveMasterPlanAction,
   saveOverrideAction,
@@ -209,9 +210,10 @@ export default function PlannerApp({
     String(resolvedWeek.teamRows[0]?.team.id ?? "1")
   );
   const [odMode, setOdMode] = useState<OverrideMode>("REPLACE");
-  const [odShiftId, setOdShiftId] = useState<string>(
-    String(store.shiftTypes[0]?.id ?? "1")
-  );
+  const [odShiftId, setOdShiftId] = useState<string>(() => {
+    const firstActive = store.shiftTypes.find((s) => s.active);
+    return firstActive ? String(firstActive.id) : "CUSTOM";
+  });
   const [odCustomStart, setOdCustomStart] = useState<string>("10:00");
   const [odCustomEnd, setOdCustomEnd] = useState<string>("19:00");
   const [odReason, setOdReason] = useState<string>("");
@@ -1994,85 +1996,108 @@ export default function PlannerApp({
                   <th>เวลาทำงาน</th>
                   <th>จำนวนชั่วโมง</th>
                   <th>สีแสดงผล</th>
+                  <th />
                 </tr>
               </thead>
               <tbody>
-                {store.shiftTypes.map((st) => {
-                  const { hours, isOvernight } = calcShiftHours(
-                    st.startTime,
-                    st.endTime
-                  );
-                  const colorMeta = getShiftColorMeta(st.color);
-                  return (
-                    <tr
-                      key={st.id}
-                      className="border-t"
-                      style={{ borderColor: "var(--line)" }}
-                    >
-                      <td className="py-2.5">
-                        <span className={`chip c-${st.color} inline-block`}>
-                          <b>{st.name}</b>{" "}
-                          <span className="mono text-xs dim">
-                            {st.startTime}–{st.endTime}
-                          </span>
-                        </span>
-                      </td>
-                      <td className="mono dim">{st.code}</td>
-                      <td
-                        style={{
-                          color:
-                            st.kind === "SPECIAL"
-                              ? "var(--tally)"
-                              : "var(--dim)",
-                        }}
+                {store.shiftTypes
+                  .filter((st) => st.active)
+                  .map((st) => {
+                    const { hours, isOvernight } = calcShiftHours(
+                      st.startTime,
+                      st.endTime
+                    );
+                    const colorMeta = getShiftColorMeta(st.color);
+                    return (
+                      <tr
+                        key={st.id}
+                        className="border-t"
+                        style={{ borderColor: "var(--line)" }}
                       >
-                        {st.kind === "SPECIAL" ? "กะพิเศษ" : "กะปกติ"}
-                      </td>
-                      <td className="mono">
-                        {st.startTime}–{st.endTime}
-                        {isOvernight && (
-                          <span className="dim text-xs"> (+1 วัน)</span>
-                        )}
-                      </td>
-                      <td className="mono dim">{hours} ชม.</td>
-                      <td>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className="w-3.5 h-3.5 rounded-xs shrink-0"
-                            style={{ background: colorMeta.hex }}
-                            title={`${colorMeta.label} (${colorMeta.hex})`}
-                          />
-                          <select
-                            aria-label={`เปลี่ยนสีของกะ ${st.name}`}
-                            value={st.color}
-                            onChange={(e) => {
-                              const nextColor = e.target.value;
-                              startTransition(async () => {
-                                await saveShiftTypeAction({
-                                  id: st.id,
-                                  code: st.code,
-                                  name: st.name,
-                                  startTime: st.startTime,
-                                  endTime: st.endTime,
-                                  kind: st.kind,
-                                  color: nextColor,
-                                });
-                                router.refresh();
-                              });
+                        <td className="py-2.5">
+                          <ShiftChip
+                            shift={{
+                              name: st.name,
+                              startTime: st.startTime,
+                              endTime: st.endTime,
+                              color: st.color,
+                              kind: st.kind,
+                              hours,
+                              isOvernight,
                             }}
-                            className="field text-xs py-1"
+                            extraClass="inline-block"
+                          />
+                        </td>
+                        <td className="mono dim">{st.code}</td>
+                        <td
+                          style={{
+                            color:
+                              st.kind === "SPECIAL"
+                                ? "var(--tally)"
+                                : "var(--dim)",
+                          }}
+                        >
+                          {st.kind === "SPECIAL" ? "กะพิเศษ" : "กะปกติ"}
+                        </td>
+                        <td className="mono">
+                          {st.startTime}–{st.endTime}
+                          {isOvernight && (
+                            <span className="dim text-xs"> (+1 วัน)</span>
+                          )}
+                        </td>
+                        <td className="mono dim">{hours} ชม.</td>
+                        <td>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className="w-3.5 h-3.5 rounded-xs shrink-0"
+                              style={{ background: colorMeta.hex }}
+                              title={`${colorMeta.label} (${colorMeta.hex})`}
+                            />
+                            <select
+                              aria-label={`เปลี่ยนสีของกะ ${st.name}`}
+                              value={st.color}
+                              onChange={(e) => {
+                                const nextColor = e.target.value;
+                                startTransition(async () => {
+                                  await saveShiftTypeAction({
+                                    id: st.id,
+                                    code: st.code,
+                                    name: st.name,
+                                    startTime: st.startTime,
+                                    endTime: st.endTime,
+                                    kind: st.kind,
+                                    color: nextColor,
+                                  });
+                                  router.refresh();
+                                });
+                              }}
+                              className="field text-xs py-1"
+                            >
+                              {SHIFT_COLORS.map((c) => (
+                                <option key={c.key} value={c.key}>
+                                  {c.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </td>
+                        <td className="text-right">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              startTransition(async () => {
+                                await removeShiftTypeAction(st.id);
+                                router.refresh();
+                              })
+                            }
+                            className="dim text-xs hover:text-white cursor-pointer"
                           >
-                            {SHIFT_COLORS.map((c) => (
-                              <option key={c.key} value={c.key}>
-                                {c.label}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                            ลบ
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
           </div>

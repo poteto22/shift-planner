@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { formatIsoDate, type PlannerStoreData } from "./schedule";
+import {
+  formatIsoDate,
+  parseIsoDate,
+  type PlannerStoreData,
+} from "./schedule";
 import { createInitialSeedData } from "./seed-data";
 import { finalizePastWeeks } from "./snapshot";
 
@@ -43,11 +47,218 @@ function writeLocalFileStore(data: PlannerStoreData): void {
 }
 
 // ponytail: uses Prisma PostgreSQL when PG_CONNECTED=true, otherwise persists to data/local-store.json until internal Postgres is running
+function resolvePostgresUrl(): string | undefined {
+  if (process.env.POSTGRES_PASSWORD) {
+    const user = encodeURIComponent(process.env.POSTGRES_USER || "postgres");
+    const pass = encodeURIComponent(process.env.POSTGRES_PASSWORD);
+    const host = process.env.POSTGRES_HOST || "localhost";
+    const port = process.env.POSTGRES_PORT || "5432";
+    const db = process.env.POSTGRES_DB || "work_planner";
+    return `postgresql://${user}:${pass}@${host}:${port}/${db}?schema=public`;
+  }
+  return process.env.DATABASE_URL;
+}
+
+async function syncStoreToPostgres(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  prisma: any,
+  store: PlannerStoreData
+): Promise<void> {
+  for (const pos of store.positions) {
+    await prisma.position.upsert({
+      where: { id: pos.id },
+      update: {
+        name: pos.name,
+        sortOrder: pos.sortOrder,
+        isLead: pos.isLead,
+        isSpecial: pos.isSpecial,
+      },
+      create: {
+        id: pos.id,
+        name: pos.name,
+        sortOrder: pos.sortOrder,
+        isLead: pos.isLead,
+        isSpecial: pos.isSpecial,
+      },
+    });
+  }
+
+  for (const team of store.teams) {
+    await prisma.team.upsert({
+      where: { id: team.id },
+      update: {
+        name: team.name,
+        sortOrder: team.sortOrder,
+        active: team.active,
+      },
+      create: {
+        id: team.id,
+        name: team.name,
+        sortOrder: team.sortOrder,
+        active: team.active,
+      },
+    });
+  }
+
+  const shiftIds = store.shiftTypes.map((s) => s.id);
+  await prisma.shiftType.deleteMany({
+    where: shiftIds.length > 0 ? { id: { notIn: shiftIds } } : {},
+  });
+  for (const st of store.shiftTypes) {
+    await prisma.shiftType.upsert({
+      where: { id: st.id },
+      update: {
+        code: st.code,
+        name: st.name,
+        startTime: st.startTime,
+        endTime: st.endTime,
+        kind: st.kind,
+        color: st.color,
+        active: st.active,
+      },
+      create: {
+        id: st.id,
+        code: st.code,
+        name: st.name,
+        startTime: st.startTime,
+        endTime: st.endTime,
+        kind: st.kind,
+        color: st.color,
+        active: st.active,
+      },
+    });
+  }
+
+  for (const emp of store.employees) {
+    await prisma.employee.upsert({
+      where: { id: emp.id },
+      update: {
+        firstName: emp.firstName,
+        lastName: emp.lastName,
+        phone: emp.phone,
+        positionId: emp.positionId,
+        teamId: emp.teamId,
+        active: emp.active,
+      },
+      create: {
+        id: emp.id,
+        firstName: emp.firstName,
+        lastName: emp.lastName,
+        phone: emp.phone,
+        positionId: emp.positionId,
+        teamId: emp.teamId,
+        active: emp.active,
+      },
+    });
+  }
+
+  for (const plan of store.masterPlans) {
+    await prisma.masterPlan.upsert({
+      where: { id: plan.id },
+      update: {
+        version: plan.version,
+        effectiveFrom: parseIsoDate(plan.effectiveFrom),
+        note: plan.note,
+      },
+      create: {
+        id: plan.id,
+        version: plan.version,
+        effectiveFrom: parseIsoDate(plan.effectiveFrom),
+        note: plan.note,
+      },
+    });
+
+    await prisma.planEntry.deleteMany({ where: { planId: plan.id } });
+    if (plan.entries.length > 0) {
+      await prisma.planEntry.createMany({
+        data: plan.entries.map((e) => ({
+          id: e.id,
+          planId: plan.id,
+          dayOfWeek: e.dayOfWeek,
+          teamId: e.teamId,
+          isCam3: e.isCam3,
+          employeeId: e.employeeId ?? null,
+          shiftTypeId: e.shiftTypeId,
+        })),
+      });
+    }
+
+    for (const slot of plan.specialSlots) {
+      await prisma.specialSlot.upsert({
+        where: { id: slot.id },
+        update: {
+          planId: plan.id,
+          dayOfWeek: slot.dayOfWeek,
+          shiftTypeId: slot.shiftTypeId,
+        },
+        create: {
+          id: slot.id,
+          planId: plan.id,
+          dayOfWeek: slot.dayOfWeek,
+          shiftTypeId: slot.shiftTypeId,
+        },
+      });
+    }
+  }
+
+  await prisma.specialAssignment.deleteMany({});
+  if (store.specialAssignments.length > 0) {
+    await prisma.specialAssignment.createMany({
+      data: store.specialAssignments.map((a) => ({
+        id: a.id,
+        slotId: a.slotId,
+        workDate: parseIsoDate(a.workDate),
+        teamId: a.teamId,
+      })),
+    });
+  }
+
+  await prisma.override.deleteMany({});
+  if (store.overrides.length > 0) {
+    await prisma.override.createMany({
+      data: store.overrides.map((o) => ({
+        id: o.id,
+        workDate: parseIsoDate(o.workDate),
+        teamId: o.teamId,
+        isCam3: o.isCam3,
+        employeeId: o.employeeId ?? null,
+        mode: o.mode,
+        shiftTypeId: o.shiftTypeId,
+        customStart: o.customStart,
+        customEnd: o.customEnd,
+        reason: o.reason,
+      })),
+    });
+  }
+
+  for (const snap of store.snapshots) {
+    await prisma.weekSnapshot.upsert({
+      where: { weekStart: parseIsoDate(snap.weekStart) },
+      update: {
+        data: snap.data as object,
+        finalizedAt: new Date(snap.finalizedAt),
+      },
+      create: {
+        weekStart: parseIsoDate(snap.weekStart),
+        data: snap.data as object,
+        finalizedAt: new Date(snap.finalizedAt),
+      },
+    });
+  }
+}
+
 async function tryLoadFromPostgres(): Promise<PlannerStoreData | null> {
   if (process.env.PG_CONNECTED !== "true") return null;
   try {
     const { PrismaClient } = await import("@prisma/client");
-    const prisma = new PrismaClient();
+    const prisma = new PrismaClient({
+      datasources: { db: { url: resolvePostgresUrl() } },
+    });
+    const teamCount = await prisma.team.count();
+    if (teamCount === 0) {
+      const initial = readLocalFileStore();
+      await syncStoreToPostgres(prisma, initial);
+    }
     const [
       teams,
       positions,
@@ -95,6 +306,7 @@ async function tryLoadFromPostgres(): Promise<PlannerStoreData | null> {
         workDate: formatIsoDate(o.workDate),
         teamId: o.teamId,
         isCam3: o.isCam3,
+        employeeId: o.employeeId,
         mode: o.mode,
         shiftTypeId: o.shiftTypeId,
         customStart: o.customStart,
@@ -112,9 +324,29 @@ async function tryLoadFromPostgres(): Promise<PlannerStoreData | null> {
   }
 }
 
+async function trySaveToPostgres(store: PlannerStoreData): Promise<boolean> {
+  if (process.env.PG_CONNECTED !== "true") return false;
+  try {
+    const { PrismaClient } = await import("@prisma/client");
+    const prisma = new PrismaClient({
+      datasources: { db: { url: resolvePostgresUrl() } },
+    });
+    await syncStoreToPostgres(prisma, store);
+    await prisma.$disconnect();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function getStore(): Promise<PlannerStoreData> {
   const pgData = await tryLoadFromPostgres();
-  if (pgData) return pgData;
+  if (pgData) {
+    if (finalizePastWeeks(pgData, getBangkokTodayIso(), 4)) {
+      await trySaveToPostgres(pgData);
+    }
+    return pgData;
+  }
 
   const store = readLocalFileStore();
   if (finalizePastWeeks(store, getBangkokTodayIso(), 4)) {
@@ -126,9 +358,10 @@ export async function getStore(): Promise<PlannerStoreData> {
 export async function mutateStore(
   mutator: (store: PlannerStoreData) => void | Promise<void>
 ): Promise<PlannerStoreData> {
-  const store = readLocalFileStore();
+  const store = await getStore();
   await mutator(store);
   finalizePastWeeks(store, getBangkokTodayIso(), 4);
   writeLocalFileStore(store);
+  await trySaveToPostgres(store);
   return store;
 }

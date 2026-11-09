@@ -10,7 +10,8 @@
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "db:reset": "rm -f data/local-store.json && prisma db push --force-reset"
   },
   "dependencies": {
     "@prisma/client": "^6.4.1",

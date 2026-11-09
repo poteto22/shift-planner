@@ -262,6 +262,27 @@ export async function saveShiftTypeAction(input: {
   revalidatePath("/");
 }
 
+export async function removeShiftTypeAction(shiftTypeId: number): Promise<void> {
+  await requireAdmin();
+  await mutateStore((store) => {
+    const usedInPlans = store.masterPlans.some(
+      (p) =>
+        p.entries.some((e) => e.shiftTypeId === shiftTypeId) ||
+        p.specialSlots.some((s) => s.shiftTypeId === shiftTypeId)
+    );
+    const usedInOverrides = store.overrides.some(
+      (o) => o.shiftTypeId === shiftTypeId
+    );
+    if (usedInPlans || usedInOverrides) {
+      const existing = store.shiftTypes.find((s) => s.id === shiftTypeId);
+      if (existing) existing.active = false;
+    } else {
+      store.shiftTypes = store.shiftTypes.filter((s) => s.id !== shiftTypeId);
+    }
+  });
+  revalidatePath("/");
+}
+
 export async function addTeamAction(name: string): Promise<void> {
   await requireAdmin();
   const trimmed = name.trim().toUpperCase();

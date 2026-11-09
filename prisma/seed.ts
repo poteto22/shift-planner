@@ -98,6 +98,7 @@ async function main() {
             dayOfWeek: e.dayOfWeek,
             teamId: e.teamId,
             isCam3: e.isCam3,
+            employeeId: e.employeeId ?? null,
             shiftTypeId: e.shiftTypeId,
           })),
         },

@@ -22,6 +22,10 @@ npm run dev
    npm run db:seed
    ```
    *(หมายเหตุ: หากยังไม่ได้เชื่อมต่อเซิร์ฟเวอร์ PostgreSQL ระบบจะบันทึกข้อมูลลง `data/local-store.json` อัตโนมัติเพื่อให้ใช้งานและทดสอบได้ทันที)*
+3. หากต้องการล้างข้อมูลทั้งหมดเพื่อเริ่มต้นระบบใหม่ตั้งแต่ต้น (ลบทั้ง `data/local-store.json` และรีเซ็ตตารางใน PostgreSQL):
+   ```bash
+   npm run db:reset
+   ```
 
 ## การรัน Unit Tests
 
