@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   resolveWeek,
   resolveMonth,
+  resolveDateRange,
   getFairnessStats,
   computeAutoRotateAssignments,
   getSundayOfWeek,
@@ -275,5 +276,24 @@ describe("Studio Shift Planner Core Logic", () => {
     assert.equal(month.specialSlotsByDay[0].length, 1); // 2026-11-01 is Sunday
     assert.equal(month.specialSlotsByDay[1].length, 0); // 2026-11-02 is Monday
     assert.equal(month.specialSlotsByDay[7].length, 1); // 2026-11-08 is Sunday
+  });
+
+  it("resolves arbitrary date range for 3-week upper table and 2-week lower table", () => {
+    const store = createTestStore();
+    // 5 weeks starting on 2026-11-01 (Sunday)
+    const upper = resolveDateRange(store, "2026-11-01", 21, "2026-11-09", 12);
+    const lower = resolveDateRange(store, "2026-11-22", 14, "2026-11-09", 12);
+
+    assert.equal(upper.days.length, 21);
+    assert.equal(upper.weekStart, "2026-11-01");
+    assert.equal(upper.weekEnd, "2026-11-21");
+    assert.equal(upper.days[0].dayOfWeek, 0); // Sunday
+    assert.equal(upper.days[20].dayOfWeek, 6); // Saturday
+
+    assert.equal(lower.days.length, 14);
+    assert.equal(lower.weekStart, "2026-11-22");
+    assert.equal(lower.weekEnd, "2026-12-05");
+    assert.equal(lower.days[0].dayOfWeek, 0); // Sunday
+    assert.equal(lower.days[13].dayOfWeek, 6); // Saturday
   });
 });

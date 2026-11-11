@@ -833,6 +833,40 @@ export function resolveMonth(
   );
 }
 
+export function resolveDateRange(
+  store: PlannerStoreData,
+  startIso: string,
+  numDays: number,
+  todayIso: string,
+  periodMonths: FairnessPeriod = 12
+): ResolvedWeek {
+  const endIso = addDays(startIso, numDays - 1);
+  const days: ScheduleDayWithPlan[] = Array.from({ length: numDays }, (_, index) => {
+    const date = addDays(startIso, index);
+    const d = parseIsoDate(date);
+    const dayOfWeek = d.getUTCDay();
+    const dayNum = Number(date.slice(8, 10));
+    const plan = getPlanForDate(store.masterPlans, date);
+    return {
+      dayOfWeek,
+      date,
+      labelShort: THAI_DAYS_SHORT[dayOfWeek],
+      dayNum,
+      planVersion: plan?.version ?? 1,
+      plan,
+    };
+  });
+
+  return resolveScheduleForDays(
+    store,
+    days,
+    startIso,
+    endIso,
+    todayIso,
+    periodMonths
+  );
+}
+
 /**
  * Computes automatic fair team rotation for any unassigned special slots in the week.
  * Priority:

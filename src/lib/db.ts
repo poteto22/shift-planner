@@ -61,14 +61,18 @@ function readLocalFileStore(): PlannerStoreData {
 }
 
 function writeLocalFileStore(data: PlannerStoreData): void {
-  const dir = path.dirname(LOCAL_STORE_PATH);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  try {
+    const dir = path.dirname(LOCAL_STORE_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(LOCAL_STORE_PATH, JSON.stringify(data, null, 2), "utf8");
+  } catch {
+    // Read-only filesystem in Vercel serverless environment; safe to ignore when DB is connected
   }
-  fs.writeFileSync(LOCAL_STORE_PATH, JSON.stringify(data, null, 2), "utf8");
 }
 
-// ponytail: uses Prisma PostgreSQL when PG_CONNECTED=true, otherwise persists to data/local-store.json until internal Postgres is running
+// ponytail: uses Prisma PostgreSQL when DATABASE_URL is provided or PG_CONNECTED=true, otherwise persists to data/local-store.json
 function resolvePostgresUrl(): string | undefined {
   if (process.env.POSTGRES_PASSWORD) {
     const user = encodeURIComponent(process.env.POSTGRES_USER || "postgres");
@@ -79,6 +83,25 @@ function resolvePostgresUrl(): string | undefined {
     return `postgresql://${user}:${pass}@${host}:${port}/${db}?schema=public`;
   }
   return process.env.DATABASE_URL;
+}
+
+function shouldConnectPostgres(): boolean {
+  if (process.env.PG_CONNECTED === "false") return false;
+  if (process.env.PG_CONNECTED === "true") return true;
+  return Boolean(resolvePostgresUrl());
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let prismaInstance: any = null;
+
+async function getPrismaClient() {
+  if (!prismaInstance) {
+    const { PrismaClient } = await import("@prisma/client");
+    prismaInstance = new PrismaClient({
+      datasources: { db: { url: resolvePostgresUrl() } },
+    });
+  }
+  return prismaInstance;
 }
 
 async function syncStoreToPostgres(
@@ -283,12 +306,9 @@ async function syncStoreToPostgres(
 }
 
 async function tryLoadFromPostgres(): Promise<PlannerStoreData | null> {
-  if (process.env.PG_CONNECTED !== "true") return null;
+  if (!shouldConnectPostgres()) return null;
   try {
-    const { PrismaClient } = await import("@prisma/client");
-    const prisma = new PrismaClient({
-      datasources: { db: { url: resolvePostgresUrl() } },
-    });
+    const prisma = await getPrismaClient();
     const teamCount = await prisma.team.count();
     if (teamCount === 0) {
       const initial = readLocalFileStore();
@@ -321,7 +341,7 @@ async function tryLoadFromPostgres(): Promise<PlannerStoreData | null> {
       positions,
       employees,
       shiftTypes,
-      masterPlans: masterPlans.map((p) => ({
+      masterPlans: masterPlans.map((p: any) => ({
         id: p.id,
         version: p.version,
         effectiveFrom: formatIsoDate(p.effectiveFrom),
@@ -329,13 +349,13 @@ async function tryLoadFromPostgres(): Promise<PlannerStoreData | null> {
         entries: p.entries,
         specialSlots: p.specialSlots,
       })),
-      specialAssignments: specialAssignments.map((a) => ({
+      specialAssignments: specialAssignments.map((a: any) => ({
         id: a.id,
         slotId: a.slotId,
         workDate: formatIsoDate(a.workDate),
         teamId: a.teamId,
       })),
-      overrides: overrides.map((o) => ({
+      overrides: overrides.map((o: any) => ({
         id: o.id,
         workDate: formatIsoDate(o.workDate),
         teamId: o.teamId,
@@ -347,7 +367,7 @@ async function tryLoadFromPostgres(): Promise<PlannerStoreData | null> {
         customEnd: o.customEnd,
         reason: o.reason,
       })),
-      snapshots: snapshots.map((s) => ({
+      snapshots: snapshots.map((s: any) => ({
         weekStart: formatIsoDate(s.weekStart),
         data: s.data as unknown as PlannerStoreData["snapshots"][number]["data"],
         finalizedAt: s.finalizedAt.toISOString(),
@@ -356,24 +376,21 @@ async function tryLoadFromPostgres(): Promise<PlannerStoreData | null> {
     if (ensureDefaultPositions(storeData)) {
       await syncStoreToPostgres(prisma, storeData);
     }
-    await prisma.$disconnect();
     return storeData;
-  } catch {
+  } catch (err) {
+    console.error("Postgres load error, falling back to local store:", err);
     return null;
   }
 }
 
 async function trySaveToPostgres(store: PlannerStoreData): Promise<boolean> {
-  if (process.env.PG_CONNECTED !== "true") return false;
+  if (!shouldConnectPostgres()) return false;
   try {
-    const { PrismaClient } = await import("@prisma/client");
-    const prisma = new PrismaClient({
-      datasources: { db: { url: resolvePostgresUrl() } },
-    });
+    const prisma = await getPrismaClient();
     await syncStoreToPostgres(prisma, store);
-    await prisma.$disconnect();
     return true;
-  } catch {
+  } catch (err) {
+    console.error("Postgres save error:", err);
     return false;
   }
 }

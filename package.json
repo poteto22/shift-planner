@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "rm -rf .next && next build",
+    "build": "prisma generate && next build",
+    "postinstall": "prisma generate",
     "start": "next start",
     "test": "node --import tsx --test src/lib/schedule.test.ts",
     "db:generate": "prisma generate",
@@ -15,6 +16,7 @@
   },
   "dependencies": {
     "@prisma/client": "^6.4.1",
+    "html-to-image": "^1.11.13",
     "next": "^15.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

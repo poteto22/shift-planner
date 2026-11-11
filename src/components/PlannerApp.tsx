@@ -8,6 +8,7 @@ import {
   getShiftColorMeta,
   getSundayOfWeek,
   groupConsecutiveCells,
+  resolveDateRange,
   resolveWeek,
   SHIFT_COLORS,
   type FairnessPeriod,
@@ -78,6 +79,28 @@ function shiftYearMonth(ym: string, deltaMonths: number): string {
 function formatThaiYearMonth(ym: string): string {
   const [y, m] = ym.split("-").map(Number);
   return `${THAI_MONTHS_SHORT[(m || 1) - 1]} ${y}`;
+}
+
+const THAI_MONTHS_FULL = [
+  "มกราคม",
+  "กุมภาพันธ์",
+  "มีนาคม",
+  "เมษายน",
+  "พฤษภาคม",
+  "มิถุนายน",
+  "กรกฎาคม",
+  "สิงหาคม",
+  "กันยายน",
+  "ตุลาคม",
+  "พฤศจิกายน",
+  "ธันวาคม",
+];
+
+function formatThaiMonthYearFull(ym: string): string {
+  const [y, m] = ym.split("-").map(Number);
+  const monthName = THAI_MONTHS_FULL[(m || 1) - 1] || "";
+  const beYear = (y || 2026) + 543;
+  return `${monthName} ${beYear}`;
 }
 
 function getMonthSixWeekStart(ym: string): string {
@@ -195,6 +218,41 @@ export default function PlannerApp({
   const [loginUser, setLoginUser] = useState("admin");
   const [loginPass, setLoginPass] = useState("");
   const [loginError, setLoginError] = useState("");
+
+  // A3 Paper Export state
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportYm, setExportYm] = useState<string>(() =>
+    resolvedWeek.weekStart.slice(0, 7)
+  );
+  const [isDownloadingA3, setIsDownloadingA3] = useState(false);
+  const a3ExportRef = useRef<HTMLDivElement>(null);
+
+  async function handleDownloadA3Image() {
+    if (!a3ExportRef.current) return;
+    try {
+      setIsDownloadingA3(true);
+      const { toPng } = await import("html-to-image");
+      const dataUrl = await toPng(a3ExportRef.current, {
+        pixelRatio: 2,
+        backgroundColor: "#ffffff",
+        cacheBust: true,
+      });
+      const title = `ตารางกะการทำงาน_${formatThaiMonthYearFull(exportYm).replace(/\s+/g, "_")}`;
+      const link = document.createElement("a");
+      link.download = `${title}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      console.error("Export image error:", err);
+      alert("เกิดข้อผิดพลาดในการสร้างหรือดาวน์โหลดรูปภาพ กรุณาลองใหม่อีกครั้ง");
+    } finally {
+      setIsDownloadingA3(false);
+    }
+  }
+
+  function handlePrintA3() {
+    window.print();
+  }
 
   const cam3Employees = store.employees
     .filter((e) => {
@@ -724,6 +782,30 @@ export default function PlannerApp({
                 onClick={() => navigateMonth(todayIso.slice(0, 7))}
               >
                 เดือนนี้
+              </button>
+              <button
+                type="button"
+                className="no-print btn text-xs flex items-center gap-1.5 ml-1"
+                onClick={() => {
+                  setExportYm(resolvedWeek.weekStart.slice(0, 7));
+                  setShowExportModal(true);
+                }}
+                title="ส่งออกรูปภาพตารางกะขนาด A3 (5 สัปดาห์)"
+              >
+                <svg
+                  className="w-3.5 h-3.5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                  />
+                </svg>
+                <span>Export รูปภาพ (A3)</span>
               </button>
             </div>
 
@@ -3576,6 +3658,798 @@ export default function PlannerApp({
           </form>
         </div>
       )}
+      {/* ==================== A3 EXPORT MODAL ==================== */}
+      {showExportModal && (() => {
+        const exportFirstIso = `${exportYm}-01`;
+        const fiveWeekStart = getSundayOfWeek(exportFirstIso);
+        const fiveWeekEnd = addDays(fiveWeekStart, 34);
+        const upperResolved = resolveDateRange(store, fiveWeekStart, 21, todayIso);
+        const lowerStart = addDays(fiveWeekStart, 21);
+        const lowerResolved = resolveDateRange(store, lowerStart, 14, todayIso);
+
+        const cam3List = store.employees
+          .filter((e) => {
+            if (!e.active) return false;
+            const pos = store.positions.find((p) => p.id === e.positionId);
+            return Boolean(pos?.isSpecial || e.teamId === null);
+          })
+          .sort((a, b) => a.id - b.id);
+
+        function getPositionShortLabel(posName?: string): string {
+          if (!posName) return "";
+          if (posName.includes("Technician Director")) return "TD";
+          if (posName.includes("Sound")) return "Sound";
+          if (posName.includes("Play Out")) return "Play Out";
+          if (posName.includes("CG")) return "CG";
+          if (posName.includes("CAM 1")) return "CAM 1";
+          if (posName.includes("CAM 2")) return "CAM 2";
+          if (posName.includes("CAM3-กะปกติ")) return "CAM 3";
+          if (posName.includes("CAM3")) return "CAM 3";
+          return posName;
+        }
+
+        function renderExportTable(
+          resolved: ResolvedWeek,
+          tableTitle: string,
+          weekSubtitle: string
+        ) {
+          return (
+            <div className="mb-3">
+              <div className="flex items-center justify-between text-xs font-semibold text-slate-700 mb-1 px-1">
+                <span>{tableTitle}</span>
+                <span className="text-slate-500 font-normal">{weekSubtitle}</span>
+              </div>
+              <table
+                className="w-full text-xs border-collapse"
+                style={{ tableLayout: "fixed" }}
+              >
+                <thead>
+                  <tr className="bg-slate-100 border-y border-slate-300">
+                    <th
+                      className="w-[68px] min-w-[68px] max-w-[68px] p-1 text-right pr-2 font-semibold text-slate-700 border-r-2 border-slate-300"
+                      style={{ borderLeft: "1px solid #cbd5e1" }}
+                    >
+                      ทีม
+                    </th>
+                    {resolved.days.map((d) => {
+                      const isSunday = d.dayOfWeek === 0;
+                      const isSaturday = d.dayOfWeek === 6;
+                      const isWeekend = isSunday || isSaturday;
+                      const isDifferentMonth = d.date.slice(0, 7) !== exportYm;
+                      return (
+                        <th
+                          key={d.date}
+                          className={`p-1 text-center font-normal border-r border-slate-300 ${
+                            isWeekend ? "bg-slate-200/60" : "bg-slate-50"
+                          } ${isSaturday ? "border-r-2 border-r-slate-400" : ""}`}
+                        >
+                          <div
+                            className={`font-semibold leading-tight ${
+                              isSunday ? "text-red-600" : "text-slate-700"
+                            }`}
+                          >
+                            {d.labelShort}
+                          </div>
+                          <div className="mono font-bold text-slate-900 leading-tight">
+                            {d.dayNum}
+                          </div>
+                          {isDifferentMonth && (
+                            <div className="text-[9px] text-slate-400 leading-none">
+                              {THAI_MONTHS_SHORT[Number(d.date.slice(5, 7)) - 1]}
+                            </div>
+                          )}
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {/* Team Rows */}
+                  {resolved.teamRows.map((row) => (
+                    <tr key={row.team.id} className="border-b border-slate-200">
+                      <td
+                        className="w-[68px] min-w-[68px] max-w-[68px] p-1 text-right pr-2 font-bold text-slate-900 bg-slate-50 border-r-2 border-slate-300 align-middle"
+                        style={{ borderLeft: "1px solid #cbd5e1" }}
+                      >
+                        <div>ทีม {row.team.name}</div>
+                        <div className="text-[10px] font-normal text-slate-500 truncate">
+                          {row.leadName.split(" ")[0]}
+                        </div>
+                      </td>
+                      {groupConsecutiveCells(row.cells).map((group) => {
+                        const firstCell = group.cells[0];
+                        const isWeekend =
+                          group.cells.length === 1
+                            ? group.cells[0].dayOfWeek === 0 ||
+                              group.cells[0].dayOfWeek === 6
+                            : group.cells.every(
+                                (c) => c.dayOfWeek === 0 || c.dayOfWeek === 6
+                              );
+                        const endsOnSaturday =
+                          group.cells[group.cells.length - 1].dayOfWeek === 6;
+                        const hasPerDayExtras = group.cells.some(
+                          (c) =>
+                            c.addedShifts.length > 0 || c.specialSlots.length > 0
+                        );
+                        return (
+                          <td
+                            key={firstCell.workDate}
+                            colSpan={group.span}
+                            className={`p-[2px] align-middle border-r border-slate-200 ${
+                              isWeekend ? "bg-slate-100/50" : ""
+                            } ${
+                              endsOnSaturday
+                                ? "border-r-2 border-r-slate-400"
+                                : ""
+                            }`}
+                          >
+                            {firstCell.wasOffByOverride ? (
+                              <div className="rounded border border-slate-300 bg-slate-100 p-0.5 text-center">
+                                <span className="font-semibold text-slate-500 text-[9px]">
+                                  หยุด (OD)
+                                </span>
+                              </div>
+                            ) : firstCell.baseShift || !hasPerDayExtras ? (
+                              (() => {
+                                const shift = firstCell.baseShift;
+                                if (!shift) {
+                                  return (
+                                    <div className="text-center text-slate-400 text-xs py-1">
+                                      — หยุด
+                                    </div>
+                                  );
+                                }
+                                const meta = getShiftColorMeta(shift.color);
+                                if (group.span === 1) {
+                                  return (
+                                    <div
+                                      className="rounded px-0.5 py-0.5 flex flex-col items-center justify-center text-center leading-none overflow-hidden"
+                                      style={{
+                                        backgroundColor: `${meta.hex}18`,
+                                        border: `1px solid ${meta.hex}60`,
+                                        borderLeft: `3px solid ${meta.hex}`,
+                                      }}
+                                    >
+                                      <span className="font-bold text-slate-900 text-[10px] leading-tight truncate max-w-full">
+                                        {shift.name}
+                                      </span>
+                                      <span className="text-[8px] font-medium text-slate-600 leading-tight whitespace-nowrap tracking-tight tabular-nums mt-0.5">
+                                        {shift.startTime}–{shift.endTime}
+                                      </span>
+                                    </div>
+                                  );
+                                }
+                                return (
+                                  <div
+                                    className="rounded px-1.5 py-1 flex items-center gap-1.5 overflow-hidden"
+                                    style={{
+                                      backgroundColor: `${meta.hex}18`,
+                                      border: `1px solid ${meta.hex}60`,
+                                      borderLeft: `3.5px solid ${meta.hex}`,
+                                    }}
+                                  >
+                                    <span className="font-bold text-slate-900 text-xs shrink-0">
+                                      {shift.name}
+                                    </span>
+                                    <span className="text-[9px] font-medium text-slate-600 tracking-tight tabular-nums whitespace-nowrap">
+                                      {shift.startTime}–{shift.endTime}
+                                    </span>
+                                  </div>
+                                );
+                              })()
+                            ) : null}
+
+                            {hasPerDayExtras && (
+                              <div
+                                className={
+                                  group.span > 1
+                                    ? "grid gap-1 mt-0.5"
+                                    : "space-y-0.5 mt-0.5"
+                                }
+                                style={
+                                  group.span > 1
+                                    ? {
+                                        gridTemplateColumns: `repeat(${group.span}, minmax(0, 1fr))`,
+                                      }
+                                    : undefined
+                                }
+                              >
+                                {group.cells.map((c) => (
+                                  <div key={c.workDate} className="space-y-0.5">
+                                    {c.addedShifts.map((ad, idx) => {
+                                      const meta = getShiftColorMeta(ad.color);
+                                      return (
+                                        <div
+                                          key={idx}
+                                          className="rounded px-0.5 py-0.5 text-[8.5px] font-semibold text-center leading-tight"
+                                          style={{
+                                            backgroundColor: `${meta.hex}22`,
+                                            border: `1px solid ${meta.hex}60`,
+                                            borderLeft: `2.5px solid ${meta.hex}`,
+                                          }}
+                                        >
+                                          <div className="truncate">{ad.name}</div>
+                                          <div className="text-[7.5px] font-medium text-slate-600 tracking-tight tabular-nums whitespace-nowrap">
+                                            {ad.startTime}–{ad.endTime}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                    {c.specialSlots.map((sp) => (
+                                      <div
+                                        key={sp.slotId}
+                                        className="rounded px-0.5 py-0.5 bg-red-50 border border-red-300 text-red-700 flex flex-col items-center justify-center text-center leading-none"
+                                      >
+                                        <div className="flex items-center gap-0.5 leading-tight">
+                                          <span className="text-[7.5px] bg-red-600 text-white px-0.5 rounded-xs uppercase leading-none py-0.5 font-bold shrink-0">
+                                            OT
+                                          </span>
+                                          <span className="font-bold text-[9px] truncate max-w-[46px]">
+                                            {sp.shift.name}
+                                          </span>
+                                        </div>
+                                        <span className="text-[7.5px] font-medium text-red-600 leading-tight whitespace-nowrap tracking-tight tabular-nums mt-0.5">
+                                          {sp.shift.startTime}–{sp.shift.endTime}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+
+                  {/* CAM3 Rows */}
+                  {resolved.cam3Rows.map((cRow) => (
+                    <tr
+                      key={`cam3-${cRow.employee.id}`}
+                      className="border-b border-slate-200"
+                    >
+                      <td
+                        className="w-[68px] min-w-[68px] max-w-[68px] p-1 text-right pr-2 font-bold text-slate-800 bg-slate-50 border-r-2 border-slate-300 align-middle"
+                        style={{ borderLeft: "1px solid #cbd5e1" }}
+                      >
+                        <div className="truncate">{cRow.employee.firstName}</div>
+                        <div className="text-[10px] font-normal text-slate-500">
+                          CAM3
+                        </div>
+                      </td>
+                      {groupConsecutiveCells(cRow.cells).map((group) => {
+                        const firstCell = group.cells[0];
+                        const isWeekend =
+                          group.cells.length === 1
+                            ? group.cells[0].dayOfWeek === 0 ||
+                              group.cells[0].dayOfWeek === 6
+                            : group.cells.every(
+                                (c) => c.dayOfWeek === 0 || c.dayOfWeek === 6
+                              );
+                        const endsOnSaturday =
+                          group.cells[group.cells.length - 1].dayOfWeek === 6;
+                        const hasAdded = group.cells.some(
+                          (c) => c.addedShifts.length > 0
+                        );
+                        return (
+                          <td
+                            key={firstCell.workDate}
+                            colSpan={group.span}
+                            className={`p-[2px] align-middle border-r border-slate-200 ${
+                              isWeekend ? "bg-slate-100/50" : ""
+                            } ${
+                              endsOnSaturday
+                                ? "border-r-2 border-r-slate-400"
+                                : ""
+                            }`}
+                          >
+                            {firstCell.wasOffByOverride ? (
+                              <div className="rounded border border-slate-300 bg-slate-100 p-0.5 text-center">
+                                <span className="font-semibold text-slate-500 text-[9px]">
+                                  หยุด (OD)
+                                </span>
+                              </div>
+                            ) : firstCell.baseShift || !hasAdded ? (
+                              (() => {
+                                const shift = firstCell.baseShift;
+                                if (!shift) {
+                                  return (
+                                    <div className="text-center text-slate-400 text-xs py-1">
+                                      — หยุด
+                                    </div>
+                                  );
+                                }
+                                const meta = getShiftColorMeta(shift.color);
+                                if (group.span === 1) {
+                                  return (
+                                    <div
+                                      className="rounded px-0.5 py-0.5 flex flex-col items-center justify-center text-center leading-none overflow-hidden"
+                                      style={{
+                                        backgroundColor: `${meta.hex}18`,
+                                        border: `1px solid ${meta.hex}60`,
+                                        borderLeft: `3px solid ${meta.hex}`,
+                                      }}
+                                    >
+                                      <span className="font-bold text-slate-900 text-[10px] leading-tight truncate max-w-full">
+                                        {shift.name}
+                                      </span>
+                                      <span className="text-[8px] font-medium text-slate-600 leading-tight whitespace-nowrap tracking-tight tabular-nums mt-0.5">
+                                        {shift.startTime}–{shift.endTime}
+                                      </span>
+                                    </div>
+                                  );
+                                }
+                                return (
+                                  <div
+                                    className="rounded px-1.5 py-1 flex items-center gap-1.5 overflow-hidden"
+                                    style={{
+                                      backgroundColor: `${meta.hex}18`,
+                                      border: `1px solid ${meta.hex}60`,
+                                      borderLeft: `3.5px solid ${meta.hex}`,
+                                    }}
+                                  >
+                                    <span className="font-bold text-slate-900 text-xs shrink-0">
+                                      {shift.name}
+                                    </span>
+                                    <span className="text-[9px] font-medium text-slate-600 tracking-tight tabular-nums whitespace-nowrap">
+                                      {shift.startTime}–{shift.endTime}
+                                    </span>
+                                  </div>
+                                );
+                              })()
+                            ) : null}
+
+                            {hasAdded && (
+                              <div
+                                className={
+                                  group.span > 1
+                                    ? "grid gap-1 mt-0.5"
+                                    : "space-y-0.5 mt-0.5"
+                                }
+                                style={
+                                  group.span > 1
+                                    ? {
+                                        gridTemplateColumns: `repeat(${group.span}, minmax(0, 1fr))`,
+                                      }
+                                    : undefined
+                                }
+                              >
+                                {group.cells.map((c) => (
+                                  <div key={c.workDate}>
+                                    {c.addedShifts.map((ad, idx) => {
+                                      const meta = getShiftColorMeta(ad.color);
+                                      return (
+                                        <div
+                                          key={idx}
+                                          className="rounded px-0.5 py-0.5 text-[8.5px] font-semibold text-center leading-tight"
+                                          style={{
+                                            backgroundColor: `${meta.hex}22`,
+                                            border: `1px solid ${meta.hex}60`,
+                                            borderLeft: `2.5px solid ${meta.hex}`,
+                                          }}
+                                        >
+                                          <div className="truncate">{ad.name}</div>
+                                          <div className="text-[7.5px] font-medium text-slate-600 tracking-tight tabular-nums whitespace-nowrap">
+                                            {ad.startTime}–{ad.endTime}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        }
+
+        return (
+          <div
+            className="fixed inset-0 z-50 flex flex-col bg-black/80 backdrop-blur-xs text-slate-100"
+            role="dialog"
+            aria-modal="true"
+            aria-label="ส่งออกตารางกะ A3"
+          >
+            {/* Top Action Bar */}
+            <div className="no-print h-14 bg-slate-900 border-b border-slate-700 px-4 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <h2 className="font-semibold text-sm sm:text-base flex items-center gap-2">
+                  <span>ส่งออกตารางกะการทำงาน (A3 Landscape)</span>
+                  <span className="text-xs px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400 mono">
+                    A3: 420 × 297 mm
+                  </span>
+                </h2>
+                {/* Month Selector in Modal */}
+                <div className="flex items-center gap-1 bg-slate-800 border border-slate-700 rounded-md p-0.5 text-xs">
+                  <button
+                    type="button"
+                    className="px-2 py-1 hover:bg-slate-700 rounded cursor-pointer"
+                    onClick={() => setExportYm(shiftYearMonth(exportYm, -1))}
+                    title="เดือนก่อนหน้า"
+                  >
+                    ‹
+                  </button>
+                  <span className="px-2 font-medium">
+                    {formatThaiYearMonth(exportYm)}
+                  </span>
+                  <button
+                    type="button"
+                    className="px-2 py-1 hover:bg-slate-700 rounded cursor-pointer"
+                    onClick={() => setExportYm(shiftYearMonth(exportYm, 1))}
+                    title="เดือนถัดไป"
+                  >
+                    ›
+                  </button>
+                  <button
+                    type="button"
+                    className="px-2 py-1 text-slate-400 hover:text-white rounded cursor-pointer"
+                    onClick={() => setExportYm(todayIso.slice(0, 7))}
+                  >
+                    เดือนนี้
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handlePrintA3}
+                  className="px-3 py-1.5 rounded-md text-xs font-medium bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 cursor-pointer flex items-center gap-1.5"
+                >
+                  <svg
+                    className="w-3.5 h-3.5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="2"
+                      d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4H7v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"
+                    />
+                  </svg>
+                  <span>สั่งพิมพ์ (Print)</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={isDownloadingA3}
+                  onClick={handleDownloadA3Image}
+                  className="px-3.5 py-1.5 rounded-md text-xs font-semibold bg-red-600 hover:bg-red-500 text-white cursor-pointer disabled:opacity-50 flex items-center gap-1.5 shadow-sm"
+                >
+                  {isDownloadingA3 ? (
+                    <>
+                      <svg
+                        className="animate-spin w-3.5 h-3.5"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                      >
+                        <circle
+                          className="opacity-25"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          strokeWidth="4"
+                        ></circle>
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                        ></path>
+                      </svg>
+                      <span>กำลังสร้างรูปภาพ...</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg
+                        className="w-3.5 h-3.5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="2"
+                          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+                        />
+                      </svg>
+                      <span>ดาวน์โหลดรูปภาพ PNG (A3)</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowExportModal(false)}
+                  className="p-1.5 text-slate-400 hover:text-white rounded cursor-pointer ml-1"
+                  title="ปิด"
+                >
+                  <svg
+                    className="w-5 h-5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="2"
+                      d="M6 18L18 6M6 6l12 12"
+                    />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Scrollable Canvas Area */}
+            <div className="flex-1 overflow-auto p-4 sm:p-8 flex justify-center bg-slate-950">
+              <div
+                ref={a3ExportRef}
+                id="a3-export-sheet"
+                className="w-[1580px] min-w-[1580px] min-h-[1118px] bg-white text-slate-800 p-6 shadow-2xl rounded-sm flex flex-col justify-between"
+                style={{
+                  backgroundColor: "#ffffff",
+                  color: "#0f172a",
+                  fontFamily:
+                    '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+                }}
+              >
+                {/* Header */}
+                <div className="border-b-2 border-slate-800 pb-3 mb-2.5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+                        ตารางกะการทำงาน {formatThaiMonthYearFull(exportYm)}
+                      </h1>
+                      <p className="text-xs text-slate-600 mt-0.5">
+                        ช่วงวันที่ {formatThaiDateShort(fiveWeekStart)} –{" "}
+                        {formatThaiDateShort(fiveWeekEnd)} (ตาราง 5 สัปดาห์ · รวม 35 วัน)
+                        {upperResolved.planVersionsUsed.length > 0 && (
+                          <span className="ml-2 text-slate-500">
+                            · Master-plan v
+                            {upperResolved.planVersionsUsed
+                              .map((p) => p.version)
+                              .join(", v")}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    {/* OT Shifts Fairness Stats for Full Year */}
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                        <span className="inline-block w-2.5 h-2.5 rounded-xs bg-red-500" />
+                        กะ OT สะสมทั้งปี:
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {upperResolved.fairness.stats.map((st) => (
+                          <span
+                            key={st.teamId}
+                            className="px-2 py-0.5 rounded bg-slate-100 border border-slate-300 text-slate-800 text-xs font-medium"
+                          >
+                            ทีม {st.teamName}:{" "}
+                            <b className="font-bold text-red-600 mono">
+                              {st.doneUpToToday}
+                            </b>
+                            {st.plannedAfterToday > 0 && (
+                              <span
+                                className="text-amber-600 mono text-[10px]"
+                                title="มอบหมายล่วงหน้า (ยังไม่ถึงวัน)"
+                              >
+                                {" "}+{st.plannedAfterToday}
+                              </span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Main Content: Full-width Upper Table (3 Weeks / 21 Days) */}
+                <div className="w-full mb-2">
+                  {renderExportTable(
+                    upperResolved,
+                    "สัปดาห์ที่ 1 – 3",
+                    `${formatThaiDateShort(fiveWeekStart)} – ${formatThaiDateShort(
+                      addDays(fiveWeekStart, 20)
+                    )} (21 วัน)`
+                  )}
+                </div>
+
+                {/* Middle Row: Lower Table (14 Days) on Left + CAM3 & Shift Times on Right */}
+                <div className="flex gap-3 items-start w-full mb-2">
+                  {/* Lower Table: 2 Weeks (14 Days) */}
+                  <div className="w-[1044px] shrink-0">
+                    {renderExportTable(
+                      lowerResolved,
+                      "สัปดาห์ที่ 4 – 5",
+                      `${formatThaiDateShort(
+                        lowerStart
+                      )} – ${formatThaiDateShort(fiveWeekEnd)} (14 วัน)`
+                    )}
+                  </div>
+
+                  {/* Beside Lower Table: CAM3 Roster & Shift Times */}
+                  <div className="w-[476px] shrink-0 space-y-2">
+                    {/* CAM3 Staff Card */}
+                    <div className="border border-slate-200 rounded-md bg-slate-50/80 p-2.5">
+                      <div className="font-bold text-xs text-slate-900 pb-1 border-b border-slate-200 flex justify-between items-center">
+                        <span>พนักงานกลุ่มเฉพาะ CAM3</span>
+                        <span className="text-[10px] font-normal text-slate-500">
+                          กะหมุนเวียน/พิเศษ
+                        </span>
+                      </div>
+                      <div className="mt-1.5 space-y-1 text-[11px]">
+                        {cam3List.map((emp) => (
+                          <div
+                            key={emp.id}
+                            className="flex items-center justify-between"
+                          >
+                            <span className="font-medium text-slate-800">
+                              {emp.firstName} {emp.lastName}
+                            </span>
+                            <span className="mono text-[11px] text-slate-600">
+                              {emp.phone || "—"}
+                            </span>
+                          </div>
+                        ))}
+                        {cam3List.length === 0 && (
+                          <div className="text-slate-400 text-[10px] italic">
+                            ไม่มีพนักงาน CAM3
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Shift Times Card */}
+                    <div className="border border-slate-200 rounded-md bg-slate-50/80 p-2.5">
+                      <div className="font-bold text-xs text-slate-900 pb-1 border-b border-slate-200">
+                        ตารางเวลากะการทำงาน (Shift Times)
+                      </div>
+                      <div className="mt-1.5 space-y-1 text-[11px]">
+                        {store.shiftTypes
+                          .filter((s) => s.active)
+                          .map((s) => {
+                            const meta = getShiftColorMeta(s.color);
+                            return (
+                              <div
+                                key={s.id}
+                                className="flex items-center justify-between"
+                              >
+                                <span className="flex items-center gap-1.5">
+                                  <span
+                                    className="w-2.5 h-2.5 rounded-xs"
+                                    style={{ backgroundColor: meta.hex }}
+                                  />
+                                  <span className="font-medium text-slate-800">
+                                    {s.name}
+                                  </span>
+                                </span>
+                                <span className="mono text-slate-600">
+                                  {s.startTime} – {s.endTime} น.
+                                </span>
+                              </div>
+                            );
+                          })}
+                        <div className="flex items-center justify-between text-slate-500 pt-0.5 border-t border-slate-200">
+                          <span className="flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 rounded-xs bg-slate-300" />
+                            <span>วันหยุดประจำสัปดาห์</span>
+                          </span>
+                          <span>—</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bottom Section: Team Rosters & Contact Phone Numbers (Teams A–E) in 5 Columns */}
+                <div className="w-full mt-1 pt-2 border-t border-slate-300">
+                  <div className="pb-1.5 flex items-center justify-between">
+                    <span className="font-bold text-xs text-slate-900">
+                      รายชื่อทีมและหมายเลขติดต่อ (Teams A–E)
+                    </span>
+                    <span className="text-[10px] text-slate-500">
+                      พนักงานประจำทีมและตำแหน่ง
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-5 gap-2.5">
+                    {store.teams
+                      .filter((t) => t.active)
+                      .sort((a, b) => a.sortOrder - b.sortOrder)
+                      .map((team) => {
+                        const teamEmployees = store.employees
+                          .filter((e) => e.active && e.teamId === team.id)
+                          .map((e) => ({
+                            employee: e,
+                            position: store.positions.find(
+                              (p) => p.id === e.positionId
+                            ),
+                          }))
+                          .sort(
+                            (a, b) =>
+                              (a.position?.sortOrder ?? 99) -
+                              (b.position?.sortOrder ?? 99)
+                          );
+                        const lead = teamEmployees.find(
+                          (m) => m.position?.isLead
+                        );
+                        return (
+                          <div
+                            key={team.id}
+                            className="border border-slate-200 rounded-md bg-slate-50/80 p-2"
+                          >
+                            <div className="flex items-center justify-between pb-1 border-b border-slate-200 text-xs">
+                              <span className="font-bold text-slate-900">
+                                ทีม {team.name}
+                              </span>
+                              <span className="text-[10px] text-slate-500">
+                                {lead
+                                  ? `หัวหน้า: ${lead.employee.firstName}`
+                                  : ""}
+                              </span>
+                            </div>
+                            <div className="mt-1 space-y-0.5 text-[11px]">
+                              {teamEmployees.map(({ employee, position }) => (
+                                <div
+                                  key={employee.id}
+                                  className="flex items-center justify-between gap-1 leading-tight"
+                                >
+                                  <span className="text-slate-400 text-[9px] w-10 shrink-0 truncate font-normal">
+                                    {getPositionShortLabel(position?.name)}
+                                  </span>
+                                  <span
+                                    className={`truncate flex-1 min-w-0 ${
+                                      position?.isLead
+                                        ? "font-bold text-slate-900"
+                                        : "text-slate-700"
+                                    }`}
+                                    title={`${employee.firstName} ${employee.lastName}`}
+                                  >
+                                    {employee.firstName} {employee.lastName}
+                                  </span>
+                                  <span className="mono text-[9px] text-slate-600 shrink-0 ml-1">
+                                    {employee.phone || "—"}
+                                  </span>
+                                </div>
+                              ))}
+                              {teamEmployees.length === 0 && (
+                                <div className="text-slate-400 text-[10px] italic">
+                                  ไม่มีพนักงานในทีม
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+
+                {/* Bottom Footer Note */}
+                <div className="border-t border-slate-200 pt-2 text-[10px] text-slate-500 flex items-center justify-between">
+                  <div>
+                    เอกสารตารางกะปฏิบัติงาน · จัดทำอัตโนมัติโดยระบบ Studio Work Planner
+                  </div>
+                  <div className="flex items-center gap-6">
+                    <span>ลงชื่อผู้จัดทำ: .................................................</span>
+                    <span>ลงชื่อผู้อนุมัติ: .................................................</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
