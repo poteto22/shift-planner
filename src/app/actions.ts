@@ -12,6 +12,7 @@ import {
   addDays,
   computeAutoRotateAssignments,
   getSundayOfWeek,
+  resolveMonth,
   type FairnessPeriod,
   type OverrideMode,
   type ShiftKind,
@@ -79,6 +80,85 @@ export async function clearWeekSpecialAssignmentsAction(
   revalidatePath("/");
 }
 
+export async function clearMonthSpecialAssignmentsAction(
+  monthStr: string
+): Promise<void> {
+  await requireAdmin();
+  const ym = monthStr.slice(0, 7);
+  await mutateStore((store) => {
+    store.specialAssignments = store.specialAssignments.filter(
+      (a) => !a.workDate.startsWith(ym)
+    );
+  });
+  revalidatePath("/");
+}
+
+export async function autoRotateMonthAction(
+  monthStr: string,
+  periodMonths: FairnessPeriod
+): Promise<void> {
+  await requireAdmin();
+  const todayIso = getBangkokTodayIso();
+  const ym = monthStr.slice(0, 7);
+  await mutateStore((store) => {
+    const resolved = resolveMonth(store, ym, todayIso, periodMonths);
+    const unassignedSlots = resolved.specialSlotsByDay
+      .flat()
+      .filter((s) => s.assignedTeamId === null);
+    unassignedSlots.sort((a, b) => a.workDate.localeCompare(b.workDate));
+
+    for (const slot of unassignedSlots) {
+      const currentResolved = resolveMonth(store, ym, todayIso, periodMonths);
+      const fairnessMap = new Map(
+        currentResolved.fairness.stats.map((s) => [
+          s.teamId,
+          s.doneUpToToday + s.plannedAfterToday,
+        ])
+      );
+      const weekOfSlot = getSundayOfWeek(slot.workDate);
+
+      const candidates = [...currentResolved.teamRows].sort((a, b) => {
+        const aCell = a.cells.find((c) => c.workDate === slot.workDate);
+        const bCell = b.cells.find((c) => c.workDate === slot.workDate);
+        const aWorking = aCell?.isWorkingRegularOrReplaced ? 1 : 0;
+        const bWorking = bCell?.isWorkingRegularOrReplaced ? 1 : 0;
+        if (aWorking !== bWorking) return aWorking - bWorking;
+
+        const aWeekCount = store.specialAssignments.filter(
+          (sa) =>
+            sa.teamId === a.team.id && getSundayOfWeek(sa.workDate) === weekOfSlot
+        ).length;
+        const bWeekCount = store.specialAssignments.filter(
+          (sa) =>
+            sa.teamId === b.team.id && getSundayOfWeek(sa.workDate) === weekOfSlot
+        ).length;
+        if (aWeekCount !== bWeekCount) return aWeekCount - bWeekCount;
+
+        const aFair = fairnessMap.get(a.team.id) ?? 0;
+        const bFair = fairnessMap.get(b.team.id) ?? 0;
+        if (aFair !== bFair) return aFair - bFair;
+
+        return a.team.sortOrder - b.team.sortOrder;
+      });
+
+      const chosen = candidates[0];
+      if (!chosen) continue;
+
+      const nextId =
+        store.specialAssignments.length > 0
+          ? Math.max(...store.specialAssignments.map((x) => x.id)) + 1
+          : 1;
+      store.specialAssignments.push({
+        id: nextId,
+        slotId: slot.slotId,
+        workDate: slot.workDate,
+        teamId: chosen.team.id,
+      });
+    }
+  });
+  revalidatePath("/");
+}
+
 export async function autoRotateWeekAction(
   weekStartIso: string,
   periodMonths: FairnessPeriod
@@ -110,6 +190,7 @@ export async function autoRotateWeekAction(
 }
 
 export async function saveMasterPlanAction(input: {
+  planId?: number;
   effectiveFrom: string;
   note: string;
   entries: Array<{
@@ -125,47 +206,122 @@ export async function saveMasterPlanAction(input: {
   }>;
 }): Promise<{ version: number }> {
   await requireAdmin();
-  let createdVersion = 1;
+  let resultVersion = 1;
+  const todayIso = getBangkokTodayIso();
   await mutateStore((store) => {
-    const nextPlanId =
-      store.masterPlans.reduce((m, p) => Math.max(m, p.id), 0) + 1;
-    const nextVersion =
-      store.masterPlans.reduce((m, p) => Math.max(m, p.version), 0) + 1;
-    createdVersion = nextVersion;
+    if (input.planId) {
+      const existing = store.masterPlans.find((p) => p.id === input.planId);
+      if (!existing) {
+        throw new Error("ไม่พบแผน Master-plan ที่ต้องการแก้ไข");
+      }
+      if (existing.effectiveFrom <= todayIso) {
+        throw new Error(
+          "สามารถแก้ไขได้เฉพาะแผน Master-plan ที่ยังไม่เริ่มต้นใช้งานเท่านั้น (วันเริ่มใช้ต้องอยู่ในอนาคต)"
+        );
+      }
+      if (input.effectiveFrom <= todayIso) {
+        throw new Error("วันเริ่มใช้ของแผนที่แก้ไขต้องอยู่ในอนาคต (มากกว่าวันนี้)");
+      }
 
-    let nextEntryId =
-      store.masterPlans
-        .flatMap((p) => p.entries)
-        .reduce((m, e) => Math.max(m, e.id), 0) + 1;
-    let nextSlotId =
-      store.masterPlans
-        .flatMap((p) => p.specialSlots)
-        .reduce((m, s) => Math.max(m, s.id), 0) + 1;
+      existing.effectiveFrom = input.effectiveFrom;
+      existing.note = input.note.trim() || `แผน Master-plan v${existing.version}`;
 
-    store.masterPlans.push({
-      id: nextPlanId,
-      version: nextVersion,
-      effectiveFrom: input.effectiveFrom,
-      note: input.note.trim() || `แผน Master-plan v${nextVersion}`,
-      entries: input.entries.map((e) => ({
+      let nextEntryId =
+        store.masterPlans
+          .flatMap((p) => p.entries)
+          .reduce((m, e) => Math.max(m, e.id), 0) + 1;
+      let nextSlotId =
+        store.masterPlans
+          .flatMap((p) => p.specialSlots)
+          .reduce((m, s) => Math.max(m, s.id), 0) + 1;
+
+      existing.entries = input.entries.map((e) => ({
         id: nextEntryId++,
-        planId: nextPlanId,
+        planId: existing.id,
         dayOfWeek: e.dayOfWeek,
         teamId: e.teamId,
         isCam3: e.isCam3,
         employeeId: e.employeeId ?? null,
         shiftTypeId: e.shiftTypeId,
-      })),
-      specialSlots: input.specialSlots.map((s) => ({
+      }));
+
+      existing.specialSlots = input.specialSlots.map((s) => ({
         id: nextSlotId++,
-        planId: nextPlanId,
+        planId: existing.id,
         dayOfWeek: s.dayOfWeek,
         shiftTypeId: s.shiftTypeId,
-      })),
-    });
+      }));
+
+      const validSlotIds = new Set(existing.specialSlots.map((s) => s.id));
+      store.specialAssignments = store.specialAssignments.filter(
+        (a) => a.workDate < existing.effectiveFrom || validSlotIds.has(a.slotId)
+      );
+
+      resultVersion = existing.version;
+    } else {
+      const nextPlanId =
+        store.masterPlans.reduce((m, p) => Math.max(m, p.id), 0) + 1;
+      const nextVersion =
+        store.masterPlans.reduce((m, p) => Math.max(m, p.version), 0) + 1;
+      resultVersion = nextVersion;
+
+      let nextEntryId =
+        store.masterPlans
+          .flatMap((p) => p.entries)
+          .reduce((m, e) => Math.max(m, e.id), 0) + 1;
+      let nextSlotId =
+        store.masterPlans
+          .flatMap((p) => p.specialSlots)
+          .reduce((m, s) => Math.max(m, s.id), 0) + 1;
+
+      store.masterPlans.push({
+        id: nextPlanId,
+        version: nextVersion,
+        effectiveFrom: input.effectiveFrom,
+        note: input.note.trim() || `แผน Master-plan v${nextVersion}`,
+        entries: input.entries.map((e) => ({
+          id: nextEntryId++,
+          planId: nextPlanId,
+          dayOfWeek: e.dayOfWeek,
+          teamId: e.teamId,
+          isCam3: e.isCam3,
+          employeeId: e.employeeId ?? null,
+          shiftTypeId: e.shiftTypeId,
+        })),
+        specialSlots: input.specialSlots.map((s) => ({
+          id: nextSlotId++,
+          planId: nextPlanId,
+          dayOfWeek: s.dayOfWeek,
+          shiftTypeId: s.shiftTypeId,
+        })),
+      });
+    }
   });
   revalidatePath("/");
-  return { version: createdVersion };
+  return { version: resultVersion };
+}
+
+export async function deleteMasterPlanAction(planId: number): Promise<void> {
+  await requireAdmin();
+  const todayIso = getBangkokTodayIso();
+  await mutateStore((store) => {
+    const existing = store.masterPlans.find((p) => p.id === planId);
+    if (!existing) return;
+    if (existing.effectiveFrom <= todayIso) {
+      throw new Error(
+        "สามารถลบได้เฉพาะแผน Master-plan ที่ยังไม่เริ่มต้นใช้งานเท่านั้น"
+      );
+    }
+    if (store.masterPlans.length <= 1) {
+      throw new Error("ต้องมีแผน Master-plan อย่างน้อย 1 แผนในระบบ");
+    }
+    const slotIds = new Set(existing.specialSlots.map((s) => s.id));
+    store.specialAssignments = store.specialAssignments.filter(
+      (a) => !slotIds.has(a.slotId)
+    );
+    store.masterPlans = store.masterPlans.filter((p) => p.id !== planId);
+  });
+  revalidatePath("/");
 }
 
 export async function saveOverrideAction(input: {

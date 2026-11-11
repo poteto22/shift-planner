@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   resolveWeek,
+  resolveMonth,
   getFairnessStats,
   computeAutoRotateAssignments,
   getSundayOfWeek,
@@ -213,5 +214,66 @@ describe("Studio Shift Planner Core Logic", () => {
     assert.equal(groups[1].sharedBaseShift, null);
     assert.equal(groups[2].span, 1);
     assert.equal(groups[2].sharedBaseShift, null);
+  });
+
+  it("applies edits to unstarted Master-plan seamlessly in future weeks without affecting past/current weeks", () => {
+    const store = createTestStore();
+    // Plan 1 is effective 2026-10-04 (already started)
+    // Add Plan 2 effective future week (2026-11-22)
+    store.masterPlans.push({
+      id: 2,
+      version: 2,
+      effectiveFrom: "2026-11-22",
+      note: "แผนอนาคต v2",
+      entries: [
+        { id: 201, planId: 2, dayOfWeek: 0, teamId: 1, isCam3: false, shiftTypeId: 2 }, // Team A -> PM
+      ],
+      specialSlots: [],
+    });
+
+    // Check week of 2026-11-08 (uses Plan 1)
+    const currentWeek = resolveWeek(store, "2026-11-08", "2026-11-09", 3);
+    assert.equal(currentWeek.teamRows[0].cells[0].baseShift?.name, "เช้า");
+
+    // Edit unstarted Plan 2 in-place (switch Team A to NT shift)
+    const futurePlan = store.masterPlans.find((p) => p.id === 2)!;
+    futurePlan.entries[0].shiftTypeId = 3; // NT
+    futurePlan.note = "แก้ไขแผนอนาคต v2";
+
+    // Current week still unaffected
+    const currentWeekAfter = resolveWeek(store, "2026-11-08", "2026-11-09", 3);
+    assert.equal(currentWeekAfter.teamRows[0].cells[0].baseShift?.name, "เช้า");
+
+    // Future week reflects edited plan
+    const futureWeek = resolveWeek(store, "2026-11-22", "2026-11-09", 3);
+    assert.equal(futureWeek.teamRows[0].cells[0].baseShift?.name, "ดึก");
+    assert.equal(futureWeek.planVersionsUsed[0].note, "แก้ไขแผนอนาคต v2");
+  });
+
+  it("resolves a full month with accurate days and special slots", () => {
+    const store = createTestStore();
+    const month = resolveMonth(store, "2026-11", "2026-11-09", 12);
+
+    // November 2026 has 30 days
+    assert.equal(month.days.length, 30);
+    assert.equal(month.weekStart, "2026-11-01");
+    assert.equal(month.weekEnd, "2026-11-30");
+    assert.equal(month.days[0].date, "2026-11-01");
+    assert.equal(month.days[29].date, "2026-11-30");
+
+    // Each team row has 30 cells
+    for (const tr of month.teamRows) {
+      assert.equal(tr.cells.length, 30);
+    }
+    // CAM3 rows have 30 cells
+    for (const cr of month.cam3Rows) {
+      assert.equal(cr.cells.length, 30);
+    }
+
+    // Special slots per day: Nov 1 (Sunday) has 1 slot, Nov 2 (Monday) has 0
+    assert.equal(month.specialSlotsByDay.length, 30);
+    assert.equal(month.specialSlotsByDay[0].length, 1); // 2026-11-01 is Sunday
+    assert.equal(month.specialSlotsByDay[1].length, 0); // 2026-11-02 is Monday
+    assert.equal(month.specialSlotsByDay[7].length, 1); // 2026-11-08 is Sunday
   });
 });

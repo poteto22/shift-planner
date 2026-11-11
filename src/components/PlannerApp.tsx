@@ -1,12 +1,14 @@
 "use client";
 
-import React, { useEffect, useState, useTransition } from "react";
+import React, { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   addDays,
   calcShiftHours,
   getShiftColorMeta,
+  getSundayOfWeek,
   groupConsecutiveCells,
+  resolveWeek,
   SHIFT_COLORS,
   type FairnessPeriod,
   type OverrideMode,
@@ -18,8 +20,11 @@ import {
 import {
   addTeamAction,
   assignSpecialSlotAction,
+  autoRotateMonthAction,
   autoRotateWeekAction,
+  clearMonthSpecialAssignmentsAction,
   clearWeekSpecialAssignmentsAction,
+  deleteMasterPlanAction,
   deleteOverrideAction,
   loginAdminAction,
   logoutAdminAction,
@@ -64,6 +69,34 @@ function formatThaiWeekRange(weekStart: string, weekEnd: string): string {
   return `อา. ${sd} ${THAI_MONTHS_SHORT[sm - 1]} – ส. ${ed} ${THAI_MONTHS_SHORT[em - 1]} ${ey}`;
 }
 
+function shiftYearMonth(ym: string, deltaMonths: number): string {
+  const [y, m] = ym.split("-").map(Number);
+  const d = new Date(Date.UTC(y, (m || 1) - 1 + deltaMonths, 1));
+  return d.toISOString().slice(0, 7);
+}
+
+function formatThaiYearMonth(ym: string): string {
+  const [y, m] = ym.split("-").map(Number);
+  return `${THAI_MONTHS_SHORT[(m || 1) - 1]} ${y}`;
+}
+
+function getMonthSixWeekStart(ym: string): string {
+  const firstIso = `${ym}-01`;
+  const w0 = getSundayOfWeek(firstIso);
+  return w0 === firstIso ? addDays(w0, -7) : w0;
+}
+
+function getCrossMonthEndSixWeekStart(ym: string): string {
+  const nextYm = shiftYearMonth(ym, 1);
+  const lastDayOfMonth = addDays(`${nextYm}-01`, -1);
+  const endWeek = getSundayOfWeek(lastDayOfMonth);
+  return addDays(endWeek, -14);
+}
+
+function isLastDayOfMonth(iso: string): boolean {
+  return addDays(iso, 1).slice(8, 10) === "01";
+}
+
 function ShiftChip({
   shift,
   extraClass = "",
@@ -74,7 +107,11 @@ function ShiftChip({
   spanDays?: number;
 }) {
   if (!shift) {
-    return <span className="dim text-xs">— หยุด</span>;
+    return (
+      <span className="dim text-xs flex items-center min-h-[44px] px-1">
+        — หยุด
+      </span>
+    );
   }
   const colorClass = `c-${shift.color}`;
   const odClass = shift.isOverdrive ? "od-badge" : "";
@@ -91,24 +128,11 @@ function ShiftChip({
       }}
       title={shift.reason ? `Overdrive: ${shift.reason}` : undefined}
     >
-      <span className="flex items-center justify-between gap-2 flex-wrap">
-        <span>
-          <b className="font-semibold">{shift.name}</b>{" "}
-          <span className="mono text-xs">
-            {shift.startTime}–{shift.endTime}
-          </span>
+      <span className="flex items-center gap-2 flex-wrap">
+        <b className="font-semibold">{shift.name}</b>{" "}
+        <span className="mono text-xs">
+          {shift.startTime}–{shift.endTime}
         </span>
-        {spanDays > 1 && (
-          <span
-            className="mono text-[11px] px-1.5 py-0.5 rounded font-medium"
-            style={{
-              background: `${hex}33`,
-              color: "var(--ink)",
-            }}
-          >
-            {spanDays} วันติดกัน
-          </span>
-        )}
       </span>
       {shift.reason && (
         <span className="block text-xs dim truncate">{shift.reason}</span>
@@ -124,7 +148,14 @@ interface PlannerAppProps {
   isAdmin: boolean;
 }
 
-type TabKey = "dash" | "master" | "od" | "shifts" | "people" | "history";
+type TabKey =
+  | "dash"
+  | "special"
+  | "master"
+  | "od"
+  | "shifts"
+  | "people"
+  | "history";
 
 export default function PlannerApp({
   store,
@@ -136,6 +167,15 @@ export default function PlannerApp({
   const [isPending, startTransition] = useTransition();
   const [activeTab, setActiveTab] = useState<TabKey>("dash");
   const [clockText, setClockText] = useState<string>("");
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+
+  // 6-Week Special Shift & Overdrive Planner state
+  const [sixWeekMonth, setSixWeekMonth] = useState<string>(() =>
+    resolvedWeek.weekStart.slice(0, 7)
+  );
+  const [sixWeekStart, setSixWeekStart] = useState<string>(() =>
+    getMonthSixWeekStart(resolvedWeek.weekStart.slice(0, 7))
+  );
 
   // Roster sidebar state ("CAM3" or teamId number)
   const [selectedRosterKey, setSelectedRosterKey] = useState<number | "CAM3">(
@@ -186,10 +226,17 @@ export default function PlannerApp({
   // Master-plan editor state
   const latestPlan =
     store.masterPlans[store.masterPlans.length - 1] ?? store.masterPlans[0];
-  const [mpEffectiveFrom, setMpEffectiveFrom] = useState<string>(
-    addDays(resolvedWeek.weekStart, 7)
-  );
-  const [mpNote, setMpNote] = useState<string>("");
+  const [editingPlanId, setEditingPlanId] = useState<number | null>(() => {
+    return latestPlan && latestPlan.effectiveFrom > todayIso ? latestPlan.id : null;
+  });
+  const [mpEffectiveFrom, setMpEffectiveFrom] = useState<string>(() => {
+    return latestPlan && latestPlan.effectiveFrom > todayIso
+      ? latestPlan.effectiveFrom
+      : addDays(resolvedWeek.weekStart, 7);
+  });
+  const [mpNote, setMpNote] = useState<string>(() => {
+    return latestPlan && latestPlan.effectiveFrom > todayIso ? latestPlan.note : "";
+  });
   const [mpGrid, setMpGrid] = useState<Record<string, number>>(() =>
     buildMpGridFromPlan(latestPlan)
   );
@@ -198,11 +245,17 @@ export default function PlannerApp({
   >(() =>
     latestPlan
       ? latestPlan.specialSlots.map((s) => ({
-          dayOfWeek: s.dayOfWeek,
-          shiftTypeId: s.shiftTypeId,
-        }))
+        dayOfWeek: s.dayOfWeek,
+        shiftTypeId: s.shiftTypeId,
+      }))
       : []
   );
+
+  const editingPlan = editingPlanId
+    ? store.masterPlans.find(
+        (p) => p.id === editingPlanId && p.effectiveFrom > todayIso
+      ) ?? null
+    : null;
 
   // Overdrive form state
   const [odDate, setOdDate] = useState<string>(todayIso);
@@ -238,11 +291,52 @@ export default function PlannerApp({
   const [empTeamId, setEmpTeamId] = useState<number>(
     store.teams[0]?.id ?? 1
   );
+  const [editingEmpId, setEditingEmpId] = useState<number | null>(null);
+  const employeeFormRef = useRef<HTMLFormElement>(null);
+
+  function handleStartEditEmployee(emp: (typeof store.employees)[number]) {
+    setEditingEmpId(emp.id);
+    setEmpFirstName(emp.firstName);
+    setEmpLastName(emp.lastName);
+    setEmpPhone(emp.phone);
+    setEmpPositionId(emp.positionId);
+    setEmpTeamId(emp.teamId ?? store.teams[0]?.id ?? 1);
+    if (activeTab !== "people") {
+      setActiveTab("people");
+    }
+    setTimeout(() => {
+      employeeFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+  }
+
+  function handleCancelEditEmployee() {
+    setEditingEmpId(null);
+    setEmpFirstName("");
+    setEmpLastName("");
+    setEmpPhone("");
+    setEmpPositionId(store.positions[0]?.id ?? 1);
+    setEmpTeamId(store.teams[0]?.id ?? 1);
+  }
 
   // History viewer state
   const [selectedSnapshotWeek, setSelectedSnapshotWeek] = useState<string | null>(
     store.snapshots[0]?.weekStart ?? null
   );
+
+  useEffect(() => {
+    const saved = localStorage.getItem("studio_theme");
+    if (saved === "light" || saved === "dark") {
+      setTheme(saved);
+      document.documentElement.setAttribute("data-theme", saved);
+    }
+  }, []);
+
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem("studio_theme", next);
+  }
 
   useEffect(() => {
     const updateClock = () => {
@@ -268,16 +362,14 @@ export default function PlannerApp({
     }
   }, [isAdmin, activeTab]);
 
-  function navigateWeek(nextWeekStart: string, nextPeriod?: FairnessPeriod) {
+  function navigateMonth(nextMonth: string, nextPeriod?: FairnessPeriod) {
     const p = nextPeriod ?? resolvedWeek.fairness.periodMonths;
-    router.push(`/?week=${nextWeekStart}&period=${p}`);
+    router.push(`/?month=${nextMonth}&period=${p}`);
   }
 
-  function handleExportPdf() {
-    const prevTitle = document.title;
-    document.title = `ตารางกะสตูดิโอ_${resolvedWeek.weekStart}_ถึง_${resolvedWeek.weekEnd}`;
-    window.print();
-    document.title = prevTitle;
+  function navigateWeek(nextWeekStart: string, nextPeriod?: FairnessPeriod) {
+    const p = nextPeriod ?? resolvedWeek.fairness.periodMonths;
+    router.push(`/?month=${nextWeekStart.slice(0, 7)}&period=${p}`);
   }
 
   function handleLoginSubmit(e: React.FormEvent) {
@@ -328,6 +420,17 @@ export default function PlannerApp({
     });
   }
 
+  function handleAutoRotateMonth() {
+    if (!isAdmin) return;
+    startTransition(async () => {
+      await autoRotateMonthAction(
+        resolvedWeek.weekStart.slice(0, 7),
+        resolvedWeek.fairness.periodMonths
+      );
+      router.refresh();
+    });
+  }
+
   function handleClearWeekAssignments() {
     if (!isAdmin) return;
     startTransition(async () => {
@@ -336,9 +439,29 @@ export default function PlannerApp({
     });
   }
 
+  function handleClearMonthAssignments() {
+    if (!isAdmin) return;
+    startTransition(async () => {
+      await clearMonthSpecialAssignmentsAction(
+        resolvedWeek.weekStart.slice(0, 7)
+      );
+      router.refresh();
+    });
+  }
+
   function loadPlanIntoEditor(planId: number) {
     const p = store.masterPlans.find((x) => x.id === planId);
     if (!p) return;
+    const isFuture = p.effectiveFrom > todayIso;
+    if (isFuture) {
+      setEditingPlanId(p.id);
+      setMpEffectiveFrom(p.effectiveFrom);
+      setMpNote(p.note);
+    } else {
+      setEditingPlanId(null);
+      setMpEffectiveFrom(addDays(todayIso, 7));
+      setMpNote(`ต่อยอดจาก v${p.version}`);
+    }
     setMpGrid(buildMpGridFromPlan(p));
     setMpSpecialSlots(
       p.specialSlots.map((s) => ({
@@ -346,6 +469,36 @@ export default function PlannerApp({
         shiftTypeId: s.shiftTypeId,
       }))
     );
+  }
+
+  function handleResetToNewPlan() {
+    setEditingPlanId(null);
+    setMpEffectiveFrom(addDays(resolvedWeek.weekStart, 7));
+    setMpNote("");
+    setMpGrid(buildMpGridFromPlan(latestPlan));
+    setMpSpecialSlots(
+      latestPlan
+        ? latestPlan.specialSlots.map((s) => ({
+            dayOfWeek: s.dayOfWeek,
+            shiftTypeId: s.shiftTypeId,
+          }))
+        : []
+    );
+  }
+
+  function handleDeleteFuturePlan(planId: number, version: number) {
+    if (
+      !window.confirm(
+        `คุณแน่ใจหรือไม่ว่าต้องการลบ Master-plan v${version} ที่ยังไม่เริ่มต้นใช้งานนี้?`
+      )
+    ) {
+      return;
+    }
+    startTransition(async () => {
+      await deleteMasterPlanAction(planId);
+      handleResetToNewPlan();
+      router.refresh();
+    });
   }
 
   function handleSaveMasterPlan(e: React.FormEvent) {
@@ -383,12 +536,15 @@ export default function PlannerApp({
     }
     startTransition(async () => {
       await saveMasterPlanAction({
+        planId: editingPlan ? editingPlan.id : undefined,
         effectiveFrom: mpEffectiveFrom,
         note: mpNote,
         entries,
         specialSlots: mpSpecialSlots,
       });
-      setMpNote("");
+      if (!editingPlan) {
+        setMpNote("");
+      }
       router.refresh();
     });
   }
@@ -416,16 +572,16 @@ export default function PlannerApp({
     selectedRosterKey === "CAM3"
       ? null
       : resolvedWeek.teamRows.find((r) => r.team.id === selectedRosterKey) ??
-        resolvedWeek.teamRows[0] ??
-        null;
+      resolvedWeek.teamRows[0] ??
+      null;
 
   const minFairnessTotal =
     resolvedWeek.fairness.stats.length > 0
       ? Math.min(
-          ...resolvedWeek.fairness.stats.map(
-            (s) => s.doneUpToToday + s.plannedAfterToday
-          )
+        ...resolvedWeek.fairness.stats.map(
+          (s) => s.doneUpToToday + s.plannedAfterToday
         )
+      )
       : 0;
 
   return (
@@ -442,7 +598,7 @@ export default function PlannerApp({
               ตารางกะสตูดิโอสถานีโทรทัศน์
             </h1>
             <p className="dim text-xs">
-              เริ่มสัปดาห์วันอาทิตย์ · กะปกติ 5 วัน + กะพิเศษหมุนเวียน (วันที่ 6)
+              เริ่มสัปดาห์วันอาทิตย์ · กะปกติ 5 วัน + กะ OT หมุนเวียน (วันที่ 6)
             </p>
           </div>
         </div>
@@ -452,6 +608,15 @@ export default function PlannerApp({
             วันนี้ {formatThaiDateShort(todayIso)} ·{" "}
             <span style={{ color: "var(--ink)" }}>{clockText || "—"}</span> ICT
           </div>
+
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="btn-ghost text-xs"
+            aria-label="สลับโหมดสีหน้าจอ"
+          >
+            {theme === "dark" ? "☀ โหมดสว่าง" : "☾ โหมดมืด"}
+          </button>
 
           {isAdmin ? (
             <div className="flex items-center gap-2">
@@ -498,6 +663,7 @@ export default function PlannerApp({
           {(
             [
               ["dash", "ตารางประจำสัปดาห์"],
+              ["special", "จัดกะ OT "],
               ["master", "Master-plan"],
               ["od", "Overdrive"],
               ["shifts", "รูปแบบกะ"],
@@ -522,49 +688,43 @@ export default function PlannerApp({
       {/* ==================== 1. WEEKLY SCHEDULE DASHBOARD ==================== */}
       {activeTab === "dash" && (
         <section>
-          {/* Week Switcher & Legend */}
+          {/* Month Switcher & Legend */}
           <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 className="no-print btn-ghost"
-                aria-label="สัปดาห์ก่อน"
+                aria-label="เดือนก่อนหน้า"
                 onClick={() =>
-                  navigateWeek(addDays(resolvedWeek.weekStart, -7))
+                  navigateMonth(
+                    shiftYearMonth(resolvedWeek.weekStart.slice(0, 7), -1)
+                  )
                 }
               >
                 ‹
               </button>
               <div className="mono text-sm px-2 font-medium">
-                {formatThaiWeekRange(
-                  resolvedWeek.weekStart,
-                  resolvedWeek.weekEnd
-                )}
+                {formatThaiYearMonth(resolvedWeek.weekStart.slice(0, 7))}
               </div>
               <button
                 type="button"
                 className="no-print btn-ghost"
-                aria-label="สัปดาห์ถัดไป"
-                onClick={() => navigateWeek(addDays(resolvedWeek.weekStart, 7))}
+                aria-label="เดือนถัดไป"
+                onClick={() =>
+                  navigateMonth(
+                    shiftYearMonth(resolvedWeek.weekStart.slice(0, 7), 1)
+                  )
+                }
               >
                 ›
               </button>
               <button
                 type="button"
                 className="no-print btn-ghost ml-1 text-xs"
-                onClick={() => navigateWeek(todayIso)}
+                onClick={() => navigateMonth(todayIso.slice(0, 7))}
               >
-                สัปดาห์นี้
+                เดือนนี้
               </button>
-              {isAdmin && (
-                <button
-                  type="button"
-                  className="no-print btn ml-1 text-xs"
-                  onClick={handleExportPdf}
-                >
-                  Export PDF
-                </button>
-              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-4 text-xs dim">
@@ -596,7 +756,7 @@ export default function PlannerApp({
                   className="inline-block w-2.5 h-2.5 rounded-xs"
                   style={{ background: "var(--tally)" }}
                 />
-                กะพิเศษ (วันที่ 6)
+                กะ OT  (วันที่ 6)
               </span>
               <span>
                 <b style={{ color: "var(--tally)" }}>OD</b> = Overdrive
@@ -607,7 +767,7 @@ export default function PlannerApp({
           {/* 6th-Day Fairness Bar (3 months / 6 months / Full year up to today only) */}
           <div className="no-print panel p-3 mb-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
             <div>
-              <b style={{ color: "var(--tally)" }}>กะพิเศษ (วันที่ 6)</b>{" "}
+              <b style={{ color: "var(--tally)" }}>กะ OT  (วันที่ 6)</b>{" "}
               <span className="dim">
                 · รอจัดทีม{" "}
                 <b className="mono" style={{ color: "var(--ink)" }}>
@@ -631,7 +791,9 @@ export default function PlannerApp({
                     <button
                       key={m}
                       type="button"
-                      onClick={() => navigateWeek(resolvedWeek.weekStart, m)}
+                      onClick={() =>
+                        navigateMonth(resolvedWeek.weekStart.slice(0, 7), m)
+                      }
                       className="px-2.5 py-1 cursor-pointer"
                       style={{
                         background: selected ? "var(--ink)" : "transparent",
@@ -685,14 +847,21 @@ export default function PlannerApp({
             </div>
 
             {isAdmin && (
-              <div className="ml-auto flex items-center gap-2">
+              <div className="ml-auto flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="btn-ghost text-xs"
+                  onClick={() => setActiveTab("special")}
+                >
+                  มุมมอง 6 สัปดาห์
+                </button>
                 <button
                   type="button"
                   className="btn-ghost text-xs"
                   disabled={isPending}
-                  onClick={handleClearWeekAssignments}
+                  onClick={handleClearMonthAssignments}
                 >
-                  ล้างการมอบหมายสัปดาห์นี้
+                  ล้างการมอบหมายเดือนนี้
                 </button>
                 <button
                   type="button"
@@ -700,9 +869,9 @@ export default function PlannerApp({
                   disabled={
                     isPending || resolvedWeek.unassignedSpecialCount === 0
                   }
-                  onClick={handleAutoRotate}
+                  onClick={handleAutoRotateMonth}
                 >
-                  จัดหมุนเวียนอัตโนมัติ
+                  จัดหมุนเวียนอัตโนมัติ (เดือนนี้)
                 </button>
               </div>
             )}
@@ -711,38 +880,60 @@ export default function PlannerApp({
           {/* Schedule Grid + Roster Sidebar */}
           <div className="flex flex-col lg:flex-row gap-4">
             <div className="panel overflow-x-auto flex-1">
-              <table className="schedule-grid w-full min-w-[920px] text-sm">
+              <table className="schedule-grid min-w-max text-sm">
                 <thead>
                   <tr>
-                    <th className="p-2.5 text-left w-[130px] dim font-normal">
-                      ทีม / แถว
+                    <th className="sticky-col w-[72px] min-w-[72px] max-w-[72px] sm:w-[130px] sm:min-w-[130px] sm:max-w-[130px] p-1.5 sm:p-2.5 text-right dim font-normal text-xs sm:text-sm">
+                      ทีม
                     </th>
                     {resolvedWeek.days.map((d) => {
                       const isToday = d.date === todayIso;
+                      const isSunday = d.dayOfWeek === 0;
+                      const isSaturday = d.dayOfWeek === 6;
+                      const isWeekend = isSunday || isSaturday;
                       return (
                         <th
                           key={d.date}
-                          className={`p-2.5 text-left font-normal ${
-                            isToday ? "today-cell today-head" : ""
-                          }`}
+                          className={`w-[72px] min-w-[72px] max-w-[72px] sm:w-[130px] sm:min-w-[130px] sm:max-w-[130px] p-1.5 sm:p-2 text-left font-normal ${
+                            isToday
+                              ? "today-cell today-head"
+                              : isWeekend
+                              ? "weekend-cell"
+                              : ""
+                          } ${isSaturday ? "border-r-2" : ""}`}
+                          style={
+                            isSaturday
+                              ? { borderRightColor: "var(--line)" }
+                              : undefined
+                          }
                         >
                           <div className="flex items-baseline justify-between">
-                            <span className={isToday ? "font-semibold" : "dim"}>
+                            <span
+                              className={
+                                isSunday
+                                  ? "font-semibold"
+                                  : isToday
+                                  ? "font-semibold"
+                                  : "dim"
+                              }
+                              style={
+                                isSunday
+                                  ? { color: "var(--tally)" }
+                                  : undefined
+                              }
+                            >
                               {d.labelShort}
                             </span>
                             <span className="mono text-xs">{d.dayNum}</span>
                           </div>
                           {resolvedWeek.planVersionsUsed.length > 1 && (
-                            <div className="mono text-xs dim">
-                              แผน v{d.planVersion}
+                            <div className="mono text-[10px] dim truncate">
+                              v{d.planVersion}
                             </div>
                           )}
                         </th>
                       );
                     })}
-                    <th className="p-2.5 dim font-normal text-center w-[58px]">
-                      วัน
-                    </th>
                   </tr>
                 </thead>
 
@@ -753,17 +944,17 @@ export default function PlannerApp({
                       selectedRosterKey === row.team.id;
                     return (
                       <tr key={row.team.id}>
-                        <td className="p-2.5 align-top">
+                        <td className="sticky-col w-[72px] min-w-[72px] max-w-[72px] sm:w-[130px] sm:min-w-[130px] sm:max-w-[130px] p-1.5 sm:p-2.5 align-middle text-right">
                           <button
                             type="button"
                             onClick={() => setSelectedRosterKey(row.team.id)}
-                            className={`font-semibold hover:underline text-left cursor-pointer ${
+                            className={`font-semibold hover:underline text-right ml-auto cursor-pointer block truncate text-xs sm:text-sm ${
                               isRosterSelected ? "underline" : ""
                             }`}
                           >
                             ทีม {row.team.name}
                           </button>
-                          <div className="dim text-xs truncate max-w-[115px]">
+                          <div className="hidden sm:block dim text-xs truncate max-w-[115px] ml-auto">
                             {row.leadName.split(" ")[0]}
                           </div>
                         </td>
@@ -773,10 +964,18 @@ export default function PlannerApp({
                           const hasToday = group.cells.some(
                             (c) => c.workDate === todayIso
                           );
+                          const isWeekend =
+                            group.cells.length === 1
+                              ? group.cells[0].dayOfWeek === 0 ||
+                                group.cells[0].dayOfWeek === 6
+                              : group.cells.every(
+                                  (c) =>
+                                    c.dayOfWeek === 0 || c.dayOfWeek === 6
+                                );
                           const targetDropCell =
                             isAdmin && pickedSlot !== null
                               ? group.cells.find(
-                                  (c) => c.dayOfWeek === pickedSlot.dayOfWeek
+                                  (c) => c.workDate === pickedSlot.workDate
                                 ) ?? null
                               : null;
                           const canDropHere = targetDropCell !== null;
@@ -785,7 +984,7 @@ export default function PlannerApp({
                               ? "drop-warn"
                               : "drop-ok"
                             : "";
-                          const cellKey = `${row.team.id}-${firstCell.dayOfWeek}`;
+                          const cellKey = `${row.team.id}-${firstCell.workDate}`;
                           const hoverClass =
                             dragHoverKey === cellKey ? "drop-hover" : "";
                           const hasPerDayExtras = group.cells.some(
@@ -793,6 +992,8 @@ export default function PlannerApp({
                               c.addedShifts.length > 0 ||
                               c.specialSlots.length > 0
                           );
+                          const endsOnSaturday =
+                            group.cells[group.cells.length - 1].dayOfWeek === 6;
 
                           return (
                             <td
@@ -828,11 +1029,20 @@ export default function PlannerApp({
                                   );
                                 }
                               }}
-                              className={`p-1.5 align-top space-y-1 ${
-                                hasToday ? "today-cell" : ""
-                              } ${dropClass} ${hoverClass} ${
+                              className={`p-1.5 align-middle space-y-1 ${
+                                hasToday
+                                  ? "today-cell"
+                                  : isWeekend
+                                  ? "weekend-cell"
+                                  : ""
+                              } ${endsOnSaturday ? "border-r-2" : ""} ${dropClass} ${hoverClass} ${
                                 canDropHere ? "cursor-pointer" : ""
                               }`}
+                              style={
+                                endsOnSaturday
+                                  ? { borderRightColor: "var(--line)" }
+                                  : undefined
+                              }
                             >
                               {firstCell.wasOffByOverride ? (
                                 <span
@@ -840,24 +1050,26 @@ export default function PlannerApp({
                                   style={{ borderColor: "var(--line)" }}
                                   title={firstCell.overrideReason}
                                 >
-                                  <b>หยุด (Overdrive)</b>
+                                  <b>หยุด (OD)</b>
                                   {firstCell.overrideReason && (
-                                    <span className="block text-xs truncate">
+                                    <span className="block text-[10px] truncate">
                                       {firstCell.overrideReason}
                                     </span>
                                   )}
                                 </span>
-                              ) : (
+                              ) : (firstCell.baseShift || !hasPerDayExtras) ? (
                                 <ShiftChip
                                   shift={firstCell.baseShift}
                                   spanDays={group.span}
                                 />
-                              )}
+                              ) : null}
 
                               {hasPerDayExtras && (
                                 <div
                                   className={
-                                    group.span > 1 ? "grid gap-1.5" : "space-y-1"
+                                    group.span > 1
+                                      ? "grid gap-1.5"
+                                      : "space-y-1"
                                   }
                                   style={
                                     group.span > 1
@@ -868,7 +1080,10 @@ export default function PlannerApp({
                                   }
                                 >
                                   {group.cells.map((cell) => (
-                                    <div key={cell.workDate} className="space-y-1">
+                                    <div
+                                      key={cell.workDate}
+                                      className="space-y-1"
+                                    >
                                       {cell.addedShifts.map((added, idx) => (
                                         <ShiftChip key={idx} shift={added} />
                                       ))}
@@ -893,7 +1108,8 @@ export default function PlannerApp({
                                             if (!isAdmin) return;
                                             e.stopPropagation();
                                             setPickedSlot(
-                                              pickedSlot?.slotId === sp.slotId
+                                              pickedSlot?.slotId === sp.slotId &&
+                                                pickedSlot?.workDate === sp.workDate
                                                 ? null
                                                 : {
                                                     slotId: sp.slotId,
@@ -903,9 +1119,17 @@ export default function PlannerApp({
                                             );
                                           }}
                                           aria-pressed={
-                                            pickedSlot?.slotId === sp.slotId
+                                            pickedSlot?.slotId === sp.slotId &&
+                                            pickedSlot?.workDate === sp.workDate
                                           }
-                                          className={`chip c-${
+                                          title={
+                                            sp.overlapWarning
+                                              ? "⚠ ซ้อนกะปกติ"
+                                              : sp.multipleSpecialWarning
+                                              ? "⚠ กะ OT 2 ครั้งในสัปดาห์"
+                                              : undefined
+                                          }
+                                          className={`chip relative c-${
                                             sp.shift.color || "sp"
                                           } ${isAdmin ? "drag-chip" : ""}`}
                                         >
@@ -921,27 +1145,17 @@ export default function PlannerApp({
                                                   null
                                                 );
                                               }}
-                                              className="no-print float-right dim px-1 hover:text-white cursor-pointer"
+                                              className="no-print absolute top-0.5 right-1 dim px-1 hover:opacity-80 cursor-pointer"
                                             >
                                               ×
                                             </button>
                                           )}
-                                          <b>{sp.shift.name}</b>{" "}
-                                          <span className="mono text-xs">
-                                            {sp.shift.startTime}–
-                                            {sp.shift.endTime}
+                                          <b className="font-semibold block truncate leading-tight pr-4">
+                                            {sp.shift.name}
+                                          </b>
+                                          <span className="mono text-[10px] tracking-tight block whitespace-nowrap leading-tight">
+                                            {sp.shift.startTime}–{sp.shift.endTime}
                                           </span>
-                                          {(sp.overlapWarning ||
-                                            sp.multipleSpecialWarning) && (
-                                            <span
-                                              className="block text-xs"
-                                              style={{ color: "var(--am)" }}
-                                            >
-                                              {sp.overlapWarning
-                                                ? "⚠ ซ้อนกะปกติ"
-                                                : "⚠ กะพิเศษ 2 ครั้ง"}
-                                            </span>
-                                          )}
                                         </span>
                                       ))}
                                     </div>
@@ -951,20 +1165,6 @@ export default function PlannerApp({
                             </td>
                           );
                         })}
-
-                        <td
-                          className="p-2 text-center mono font-semibold"
-                          style={{
-                            color:
-                              row.totalWorkDays === 6
-                                ? "var(--tally)"
-                                : row.totalWorkDays === 5
-                                ? "var(--dim)"
-                                : "var(--am)",
-                          }}
-                        >
-                          {row.totalWorkDays}
-                        </td>
                       </tr>
                     );
                   })}
@@ -972,35 +1172,57 @@ export default function PlannerApp({
                   {/* Dedicated CAM3 Rows (per individual CAM3 employee) */}
                   {resolvedWeek.cam3Rows.map((cRow) => (
                     <tr key={`cam3-${cRow.employee.id}`}>
-                      <td className="p-2.5 align-top">
+                      <td className="sticky-col w-[72px] min-w-[72px] max-w-[72px] sm:w-[130px] sm:min-w-[130px] sm:max-w-[130px] p-1.5 sm:p-2.5 align-middle text-right">
                         <button
                           type="button"
                           onClick={() => setSelectedRosterKey("CAM3")}
-                          className={`font-semibold hover:underline text-left cursor-pointer ${
+                          className={`font-semibold hover:underline text-right ml-auto cursor-pointer block truncate text-xs sm:text-sm ${
                             selectedRosterKey === "CAM3" ? "underline" : ""
                           }`}
+                          title={`${cRow.employee.firstName} ${cRow.employee.lastName}`}
                         >
-                          {cRow.employee.firstName} {cRow.employee.lastName}
+                          <span className="sm:hidden">
+                            {cRow.employee.firstName}
+                          </span>
+                          <span className="hidden sm:inline">
+                            {cRow.employee.firstName} {cRow.employee.lastName}
+                          </span>
                         </button>
-                        <div className="dim text-xs">
-                          CAM3 · <span className="mono">{cRow.employee.phone}</span>
-                        </div>
                       </td>
                       {groupConsecutiveCells(cRow.cells).map((group) => {
                         const firstCell = group.cells[0];
                         const hasToday = group.cells.some(
                           (c) => c.workDate === todayIso
                         );
+                        const isWeekend =
+                          group.cells.length === 1
+                            ? group.cells[0].dayOfWeek === 0 ||
+                              group.cells[0].dayOfWeek === 6
+                            : group.cells.every(
+                                (c) =>
+                                  c.dayOfWeek === 0 || c.dayOfWeek === 6
+                              );
                         const hasAdded = group.cells.some(
                           (c) => c.addedShifts.length > 0
                         );
+                        const endsOnSaturday =
+                          group.cells[group.cells.length - 1].dayOfWeek === 6;
                         return (
                           <td
                             key={firstCell.workDate}
                             colSpan={group.span}
-                            className={`p-1.5 align-top space-y-1 ${
-                              hasToday ? "today-cell" : ""
-                            }`}
+                            className={`p-1.5 align-middle space-y-1 ${
+                              hasToday
+                                ? "today-cell"
+                                : isWeekend
+                                ? "weekend-cell"
+                                : ""
+                            } ${endsOnSaturday ? "border-r-2" : ""}`}
+                            style={
+                              endsOnSaturday
+                                ? { borderRightColor: "var(--line)" }
+                                : undefined
+                            }
                           >
                             {firstCell.wasOffByOverride ? (
                               <span
@@ -1008,23 +1230,25 @@ export default function PlannerApp({
                                 style={{ borderColor: "var(--line)" }}
                                 title={firstCell.overrideReason}
                               >
-                                <b>หยุด (Overdrive)</b>
+                                <b>หยุด (OD)</b>
                                 {firstCell.overrideReason && (
-                                  <span className="block text-xs truncate">
+                                  <span className="block text-[10px] truncate">
                                     {firstCell.overrideReason}
                                   </span>
                                 )}
                               </span>
-                            ) : (
+                            ) : (firstCell.baseShift || !hasAdded) ? (
                               <ShiftChip
                                 shift={firstCell.baseShift}
                                 spanDays={group.span}
                               />
-                            )}
+                            ) : null}
                             {hasAdded && (
                               <div
                                 className={
-                                  group.span > 1 ? "grid gap-1.5" : "space-y-1"
+                                  group.span > 1
+                                    ? "grid gap-1.5"
+                                    : "space-y-1"
                                 }
                                 style={
                                   group.span > 1
@@ -1035,7 +1259,10 @@ export default function PlannerApp({
                                 }
                               >
                                 {group.cells.map((cell) => (
-                                  <div key={cell.workDate} className="space-y-1">
+                                  <div
+                                    key={cell.workDate}
+                                    className="space-y-1"
+                                  >
                                     {cell.addedShifts.map((added, idx) => (
                                       <ShiftChip key={idx} shift={added} />
                                     ))}
@@ -1046,50 +1273,53 @@ export default function PlannerApp({
                           </td>
                         );
                       })}
-                      <td
-                        className="p-2 text-center mono font-semibold"
-                        style={{
-                          color:
-                            cRow.totalWorkDays === 6
-                              ? "var(--tally)"
-                              : cRow.totalWorkDays === 5
-                              ? "var(--dim)"
-                              : "var(--am)",
-                        }}
-                      >
-                        {cRow.totalWorkDays}
-                      </td>
                     </tr>
                   ))}
 
-                  {/* Special Shift Row (2 recurring special shifts per week from Master-plan) */}
+                  {/* Special Shift Row (aligned horizontally with all days) */}
                   <tr>
                     <td
-                      className="p-2.5 align-top"
+                      className="sticky-col w-[72px] min-w-[72px] max-w-[72px] sm:w-[130px] sm:min-w-[130px] sm:max-w-[130px] p-1.5 sm:p-2.5 align-top text-right"
                       style={{ color: "var(--tally)" }}
                     >
-                      <b>กะพิเศษ</b>
-                      <div className="dim text-xs">
+                      <b className="text-xs sm:text-sm block">กะ OT</b>
+                      <div className="hidden sm:block dim text-[11px]">
                         {isAdmin ? "ลากวาง / เลือกทีม" : "วันที่ 6 หมุนเวียน"}
                       </div>
                     </td>
-                    {resolvedWeek.specialSlotsByDay.map((slots, dow) => {
-                      const d = resolvedWeek.days[dow];
+                    {resolvedWeek.specialSlotsByDay.map((slots, dayIndex) => {
+                      const d = resolvedWeek.days[dayIndex];
                       const isToday = d.date === todayIso;
+                      const isSaturday = d.dayOfWeek === 6;
+                      const isWeekend = d.dayOfWeek === 0 || d.dayOfWeek === 6;
                       return (
                         <td
                           key={d.date}
-                          className={`p-1.5 align-top space-y-1.5 ${
-                            isToday ? "today-cell" : ""
-                          }`}
+                          className={`w-[72px] min-w-[72px] max-w-[72px] sm:w-[130px] sm:min-w-[130px] sm:max-w-[130px] p-1.5 align-top space-y-1.5 ${
+                            isToday
+                              ? "today-cell"
+                              : isWeekend
+                              ? "weekend-cell"
+                              : ""
+                          } ${isSaturday ? "border-r-2" : ""}`}
+                          style={
+                            isSaturday
+                              ? { borderRightColor: "var(--line)" }
+                              : undefined
+                          }
                         >
                           {slots.map((sp) => {
-                            const isPicked = pickedSlot?.slotId === sp.slotId;
+                            const isPicked =
+                              pickedSlot?.slotId === sp.slotId &&
+                              pickedSlot?.workDate === sp.workDate;
                             return (
                               <div key={sp.slotId} className="space-y-1">
                                 {sp.assignedTeamId ? (
                                   <div className="text-xs dim">
-                                    <span>{sp.shift.name}</span> →{" "}
+                                    <span className="truncate block font-medium">
+                                      {sp.shift.name}
+                                    </span>
+                                    <span>→ </span>
                                     <b style={{ color: "var(--ink)" }}>
                                       ทีม {sp.assignedTeamName}
                                     </b>
@@ -1122,18 +1352,20 @@ export default function PlannerApp({
                                       )
                                     }
                                     aria-pressed={isPicked}
-                                    className={`chip c-${sp.shift.color || "sp"} ${
-                                      isAdmin ? "drag-chip" : ""
-                                    }`}
-                                  >
-                                    <b>{sp.shift.name}</b>{" "}
-                                    <span className="mono text-xs">
-                                      {sp.shift.startTime}–{sp.shift.endTime}
-                                    </span>
-                                    <span className="block text-xs dim">
-                                      {isAdmin
+                                    title={
+                                      isAdmin
                                         ? "ลากไปวางที่ทีม หรือเลือกด้านล่าง"
-                                        : "รอจัดทีม"}
+                                        : "รอจัดทีม"
+                                    }
+                                    className={`chip c-${
+                                      sp.shift.color || "sp"
+                                    } ${isAdmin ? "drag-chip" : ""}`}
+                                  >
+                                    <b className="font-semibold block truncate leading-tight">
+                                      {sp.shift.name}
+                                    </b>
+                                    <span className="mono text-[10px] tracking-tight block whitespace-nowrap leading-tight">
+                                      {sp.shift.startTime}–{sp.shift.endTime}
                                     </span>
                                   </span>
                                 )}
@@ -1150,12 +1382,12 @@ export default function PlannerApp({
                                         val ? Number(val) : null
                                       );
                                     }}
-                                    className="no-print field w-full text-xs py-1"
+                                    className="no-print field w-full text-[11px] py-1 mt-1 truncate"
                                   >
                                     <option value="">— เลือกทีม —</option>
                                     {resolvedWeek.teamRows.map((tr) => {
                                       const isOff =
-                                        !tr.cells[dow]
+                                        !tr.cells[dayIndex]
                                           .isWorkingRegularOrReplaced;
                                       return (
                                         <option
@@ -1163,7 +1395,7 @@ export default function PlannerApp({
                                           value={tr.team.id}
                                         >
                                           ทีม {tr.team.name}{" "}
-                                          {isOff ? "(หยุดวันนี้)" : "(มีกะปกติ)"}
+                                          {isOff ? "(หยุด)" : "(มีกะ)"}
                                         </option>
                                       );
                                     })}
@@ -1175,7 +1407,6 @@ export default function PlannerApp({
                         </td>
                       );
                     })}
-                    <td className="p-2" />
                   </tr>
                 </tbody>
               </table>
@@ -1204,9 +1435,23 @@ export default function PlannerApp({
                           <span className="font-medium">
                             {cRow.employee.firstName} {cRow.employee.lastName}
                           </span>
-                          <span className="mono dim text-xs">
-                            {cRow.employee.phone}
-                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span className="mono dim text-xs">
+                              {cRow.employee.phone}
+                            </span>
+                            {isAdmin && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleStartEditEmployee(cRow.employee)
+                                }
+                                className="dim hover:text-white text-[11px] px-1 rounded cursor-pointer"
+                                title="แก้ไขข้อมูลพนักงาน"
+                              >
+                                ✎
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </li>
                     ))}
@@ -1248,9 +1493,23 @@ export default function PlannerApp({
                                   >
                                     {m.employee.firstName} {m.employee.lastName}
                                   </span>
-                                  <span className="mono dim text-xs">
-                                    {m.employee.phone}
-                                  </span>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="mono dim text-xs">
+                                      {m.employee.phone}
+                                    </span>
+                                    {isAdmin && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleStartEditEmployee(m.employee)
+                                        }
+                                        className="dim hover:text-white text-[11px] px-1 rounded cursor-pointer"
+                                        title="แก้ไขข้อมูลพนักงาน"
+                                      >
+                                        ✎
+                                      </button>
+                                    )}
+                                  </div>
                                 </div>
                               ))
                             ) : (
@@ -1268,7 +1527,7 @@ export default function PlannerApp({
           <p className="no-print dim text-xs mt-2">
             {isAdmin ? (
               <>
-                <b>วิธีมอบหมายกะพิเศษ (วันที่ 6):</b> ลากกะพิเศษไปวางที่ช่องของทีม
+                <b>วิธีมอบหมายกะ OT  (วันที่ 6):</b> ลากกะ OT ไปวางที่ช่องของทีม
                 หรือคลิกที่กะแล้วคลิกช่องของทีม หรือเลือกจาก dropdown ในแถวล่าง ·{" "}
                 <span style={{ color: "var(--ok)" }}>กรอบเขียว</span> = ทีมหยุดวันนั้น
                 (ทำเป็นวันที่ 6 ได้พอดี) ·{" "}
@@ -1280,67 +1539,545 @@ export default function PlannerApp({
               </>
             )}
           </p>
-
-          {/* Compact Roster Summary for A4 Landscape Print / PDF Export */}
-          <div className="print-only mt-3 pt-2 border-t" style={{ borderColor: "var(--line)" }}>
-            <div className="grid grid-cols-6 gap-2 text-[10px]">
-              {resolvedWeek.teamRows.map((tr) => (
-                <div key={tr.team.id} className="p-1.5 rounded border" style={{ borderColor: "var(--line)" }}>
-                  <div className="font-semibold mb-1">
-                    ทีม {tr.team.name} ({tr.totalWorkDays} วัน)
-                  </div>
-                  {tr.members.map((m) => (
-                    <div key={m.employee.id} className="flex justify-between gap-1 truncate">
-                      <span>
-                        {m.employee.firstName} {m.employee.lastName}
-                      </span>
-                      <span className="mono dim">{m.employee.phone}</span>
-                    </div>
-                  ))}
-                </div>
-              ))}
-              <div className="p-1.5 rounded border" style={{ borderColor: "var(--line)" }}>
-                <div className="font-semibold mb-1">CAM3 (ตำแหน่งพิเศษ)</div>
-                {resolvedWeek.cam3Rows.map((cRow) => (
-                  <div key={cRow.employee.id} className="flex justify-between gap-1 truncate">
-                    <span>
-                      {cRow.employee.firstName} {cRow.employee.lastName} ({cRow.totalWorkDays} วัน)
-                    </span>
-                    <span className="mono dim">{cRow.employee.phone}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
         </section>
       )}
+
+      {/* ==================== 1.5. 6-WEEK SPECIAL SHIFT & OVERDRIVE PLANNER ==================== */}
+      {isAdmin && activeTab === "special" && (() => {
+        const sixWeeks = Array.from({ length: 6 }, (_, idx) =>
+          resolveWeek(
+            store,
+            addDays(sixWeekStart, idx * 7),
+            todayIso,
+            resolvedWeek.fairness.periodMonths
+          )
+        );
+        const sixWeekEnd = addDays(sixWeekStart, 41);
+        const activeTeams = store.teams
+          .filter((t) => t.active)
+          .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
+
+        const isFullYear = resolvedWeek.fairness.periodMonths === 12;
+        const yearEndIso = `${todayIso.slice(0, 4)}-12-31`;
+
+        const teamHeaderStats = activeTeams.map((team) => {
+          const fair = resolvedWeek.fairness.stats.find(
+            (s) => s.teamId === team.id
+          );
+          const doneUpToToday = fair?.doneUpToToday ?? 0;
+          const plannedSpecialAfterToday = store.specialAssignments.filter(
+            (a) =>
+              a.teamId === team.id &&
+              a.workDate > todayIso &&
+              (!isFullYear || a.workDate <= yearEndIso)
+          ).length;
+          const plannedOdAddAfterToday = store.overrides.filter(
+            (o) =>
+              !o.isCam3 &&
+              o.teamId === team.id &&
+              o.mode === "ADD" &&
+              o.workDate > todayIso &&
+              (!isFullYear || o.workDate <= yearEndIso)
+          ).length;
+          const plannedAfterToday =
+            plannedSpecialAfterToday + plannedOdAddAfterToday;
+          return {
+            team,
+            doneUpToToday,
+            plannedAfterToday,
+            total: doneUpToToday + plannedAfterToday,
+          };
+        });
+
+        const minTotalStat =
+          teamHeaderStats.length > 0
+            ? Math.min(...teamHeaderStats.map((s) => s.total))
+            : 0;
+
+        const isFullMonthMode =
+          sixWeekStart === getMonthSixWeekStart(sixWeekMonth);
+        const isCrossMonthEndMode =
+          sixWeekStart === getCrossMonthEndSixWeekStart(sixWeekMonth);
+
+        return (
+          <section className="space-y-3">
+            {/* Pinned Compact Header: Controls + Cumulative/Planned Summary */}
+            <div
+              className="sticky top-0 z-20 panel px-3 py-2 space-y-1.5 shadow-md"
+              style={{ background: "var(--panel)" }}
+            >
+              {/* Line 1: Compact 6-Week Navigation */}
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    className="btn-ghost text-xs py-0.5 px-2"
+                    onClick={() => {
+                      const prevYm = shiftYearMonth(sixWeekMonth, -1);
+                      setSixWeekMonth(prevYm);
+                      setSixWeekStart(getMonthSixWeekStart(prevYm));
+                    }}
+                  >
+                    ‹
+                  </button>
+                  <span className="mono font-semibold text-sm px-1">
+                    {formatThaiYearMonth(sixWeekMonth)}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-ghost text-xs py-0.5 px-2"
+                    onClick={() => {
+                      const nextYm = shiftYearMonth(sixWeekMonth, 1);
+                      setSixWeekMonth(nextYm);
+                      setSixWeekStart(getMonthSixWeekStart(nextYm));
+                    }}
+                  >
+                    ›
+                  </button>
+                  <span className="mono dim hidden sm:inline">
+                    ({formatThaiDateShort(sixWeekStart)} –{" "}
+                    {formatThaiDateShort(sixWeekEnd)})
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSixWeekStart(getMonthSixWeekStart(sixWeekMonth))
+                    }
+                    className="px-2 py-0.5 rounded border cursor-pointer"
+                    style={{
+                      borderColor: isFullMonthMode
+                        ? "var(--tally)"
+                        : "var(--line)",
+                      background: isFullMonthMode
+                        ? "rgba(255,59,48,0.14)"
+                        : "var(--panel2)",
+                      color: isFullMonthMode ? "var(--ink)" : "var(--dim)",
+                      fontWeight: isFullMonthMode ? 600 : 400,
+                    }}
+                  >
+                    ทั้งเดือน
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSixWeekStart(
+                        getCrossMonthEndSixWeekStart(sixWeekMonth)
+                      )
+                    }
+                    className="px-2 py-0.5 rounded border cursor-pointer"
+                    style={{
+                      borderColor: isCrossMonthEndMode
+                        ? "var(--tally)"
+                        : "var(--line)",
+                      background: isCrossMonthEndMode
+                        ? "rgba(255,59,48,0.14)"
+                        : "var(--panel2)",
+                      color: isCrossMonthEndMode ? "var(--ink)" : "var(--dim)",
+                      fontWeight: isCrossMonthEndMode ? 600 : 400,
+                    }}
+                  >
+                    คร่อมสิ้นเดือน
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ghost text-xs py-0.5 px-1.5"
+                    onClick={() => setSixWeekStart(addDays(sixWeekStart, -7))}
+                    title="เลื่อนขึ้น 1 สัปดาห์"
+                  >
+                    -1 สัปดาห์
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ghost text-xs py-0.5 px-1.5"
+                    onClick={() => setSixWeekStart(addDays(sixWeekStart, 7))}
+                    title="เลื่อนลง 1 สัปดาห์"
+                  >
+                    +1 สัปดาห์
+                  </button>
+                </div>
+              </div>
+
+              {/* Line 2: Compact Cumulative & Planned Summary Bar */}
+              <div
+                className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1.5 border-t text-xs"
+                style={{ borderColor: "var(--line)" }}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="dim">สะสม:</span>
+                  <div
+                    className="inline-flex rounded overflow-hidden border"
+                    style={{ borderColor: "var(--line)" }}
+                  >
+                    {([3, 6, 12] as FairnessPeriod[]).map((m) => {
+                      const selected =
+                        resolvedWeek.fairness.periodMonths === m;
+                      return (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() =>
+                            navigateWeek(resolvedWeek.weekStart, m)
+                          }
+                          className="px-1.5 py-0.5 cursor-pointer text-[11px]"
+                          style={{
+                            background: selected
+                              ? "var(--ink)"
+                              : "transparent",
+                            color: selected ? "var(--bg)" : "var(--dim)",
+                            fontWeight: selected ? 600 : 400,
+                          }}
+                        >
+                          {m === 12 ? "ปี" : `${m}ด.`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {teamHeaderStats.map((st) => {
+                    const isLowest = st.total === minTotalStat;
+                    return (
+                      <span
+                        key={st.team.id}
+                        className="px-2 py-0.5 rounded border mono text-xs inline-flex items-center gap-1"
+                        style={{
+                          background: "var(--panel2)",
+                          borderColor: isLowest
+                            ? "rgba(62,207,142,0.55)"
+                            : "var(--line)",
+                        }}
+                      >
+                        <span className="font-sans font-semibold">
+                          ทีม {st.team.name}
+                        </span>
+                        <b
+                          style={{
+                            color: isLowest ? "var(--ok)" : "var(--ink)",
+                          }}
+                          title="ยอดสะสมถึงวันนี้"
+                        >
+                          {st.doneUpToToday}
+                        </b>
+                        <span
+                          style={{ color: "var(--am)" }}
+                          title="ยอดที่จัดไว้ล่วงหน้า"
+                        >
+                          +{st.plannedAfterToday}
+                        </span>
+                      </span>
+                    );
+                  })}
+                </div>
+
+                <span className="dim text-[11px] ml-auto">
+                  เลขหน้า = สะสมถึงวันนี้ ·{" "}
+                  <span style={{ color: "var(--am)" }}>+หลัง</span> = จัดล่วงหน้า
+                </span>
+              </div>
+            </div>
+
+            {/* 3-Column Table: วันที่ | กะ OT  | เลือกทีมที่ว่าง (with Overdrive Separator Rows) */}
+            <div className="panel overflow-x-auto">
+              <table className="schedule-grid w-full text-sm">
+                <thead>
+                  <tr>
+                    <th className="p-1.5 sm:p-2.5 text-left dim font-normal w-[76px] sm:w-[135px]">
+                      วันที่
+                    </th>
+                    <th className="p-1.5 sm:p-2.5 text-left dim font-normal">
+                      กะ OT
+                    </th>
+                    <th className="p-1.5 sm:p-2.5 text-left dim font-normal w-[112px] sm:w-[210px]">
+                      เลือกทีมว่าง
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(() => {
+                    const allItems: Array<
+                      | {
+                        kind: "SPECIAL";
+                        date: string;
+                        dow: number;
+                        wk: ResolvedWeek;
+                        slot: ResolvedWeek["specialSlotsByDay"][number][number];
+                      }
+                      | {
+                        kind: "OVERDRIVE";
+                        date: string;
+                        dow: number;
+                        ov: PlannerStoreData["overrides"][number];
+                      }
+                    > = [];
+
+                    for (const wk of sixWeeks) {
+                      for (let dow = 0; dow < 7; dow++) {
+                        const d = wk.days[dow];
+                        const dayOverrides = store.overrides.filter(
+                          (o) => o.workDate === d.date
+                        );
+                        for (const ov of dayOverrides) {
+                          allItems.push({
+                            kind: "OVERDRIVE",
+                            date: d.date,
+                            dow,
+                            ov,
+                          });
+                        }
+                        for (const sp of wk.specialSlotsByDay[dow]) {
+                          allItems.push({
+                            kind: "SPECIAL",
+                            date: d.date,
+                            dow,
+                            wk,
+                            slot: sp,
+                          });
+                        }
+                      }
+                    }
+
+                    if (allItems.length === 0) {
+                      return (
+                        <tr>
+                          <td
+                            colSpan={3}
+                            className="p-4 dim text-xs text-center"
+                          >
+                            ไม่มีกะ OT หรือ Overdrive ในช่วง 6 สัปดาห์นี้
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return allItems.map((item) => {
+                      if (item.kind === "OVERDRIVE") {
+                        const { ov, dow } = item;
+                        const team = store.teams.find(
+                          (t) => t.id === ov.teamId
+                        );
+                        const cam3Emp = ov.isCam3
+                          ? store.employees.find((e) => e.id === ov.employeeId)
+                          : undefined;
+                        const st = store.shiftTypes.find(
+                          (s) => s.id === ov.shiftTypeId
+                        );
+                        const modeLabel =
+                          ov.mode === "ADD"
+                            ? "Overdrive · เพิ่มกะ"
+                            : ov.mode === "REPLACE"
+                              ? "Overdrive · แทนที่กะ"
+                              : "Overdrive · สั่งหยุด";
+                        const targetLabel = ov.isCam3
+                          ? cam3Emp
+                            ? `${cam3Emp.firstName} ${cam3Emp.lastName}`
+                            : "CAM3"
+                          : `ทีม ${team?.name ?? "-"}`;
+                        const shiftText =
+                          ov.mode === "OFF"
+                            ? "สั่งหยุดงาน"
+                            : st
+                              ? `${st.name} (${st.startTime}–${st.endTime})`
+                              : `${ov.customStart}–${ov.customEnd}`;
+
+                        return (
+                          <tr
+                            key={`od-${ov.id}`}
+                            style={{
+                              background: "rgba(255,59,48,0.07)",
+                              height: "auto",
+                            }}
+                          >
+                            <td className="p-1.5 sm:p-2 align-middle mono text-[11px] sm:text-xs leading-tight">
+                              <b>{THAI_DAYS_SHORT[dow]}</b>{" "}
+                              {
+                                formatThaiDateShort(ov.workDate)
+                                  .split(" ")
+                                  .slice(0, 2)
+                                  .join(" ")
+                              }
+                            </td>
+                            <td
+                              colSpan={2}
+                              className="p-1.5 sm:p-2 align-middle text-xs"
+                            >
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span
+                                  className="px-1.5 py-0.5 rounded font-semibold text-[10px] sm:text-[11px]"
+                                  style={{
+                                    background: "rgba(255,59,48,0.18)",
+                                    color: "var(--tally)",
+                                  }}
+                                >
+                                  {modeLabel}
+                                </span>
+                                <b>{targetLabel}</b>
+                                <span className="mono">{shiftText}</span>
+                                {ov.reason && (
+                                  <span className="dim">· {ov.reason}</span>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      }
+
+                      const { slot: sp, wk } = item;
+                      const isEndOfMonth = isLastDayOfMonth(sp.workDate);
+                      const isFirstOfMonth = sp.workDate.slice(8, 10) === "01";
+                      const shortDayMonth = formatThaiDateShort(sp.workDate)
+                        .split(" ")
+                        .slice(0, 2)
+                        .join(" ");
+
+                      // Filter only teams that are FREE (OFF) on this day (plus keep currently assigned team if any)
+                      const availableTeams = wk.teamRows.filter((tr) => {
+                        const isOff =
+                          !tr.cells[sp.dayOfWeek].isWorkingRegularOrReplaced;
+                        return isOff || tr.team.id === sp.assignedTeamId;
+                      });
+
+                      return (
+                        <tr key={`sp-${sp.slotId}-${sp.workDate}`}>
+                          <td className="p-1.5 sm:p-2.5 align-middle leading-tight">
+                            <div className="font-semibold text-xs whitespace-nowrap">
+                              {THAI_DAYS_SHORT[sp.dayOfWeek]}{" "}
+                              <span className="mono">{shortDayMonth}</span>
+                            </div>
+                            {(isEndOfMonth || isFirstOfMonth) && (
+                              <span
+                                className="inline-block mt-0.5 text-[10px] px-1 py-0.5 rounded font-semibold"
+                                style={{
+                                  background: isEndOfMonth
+                                    ? "rgba(242,179,61,0.18)"
+                                    : "rgba(69,193,214,0.18)",
+                                  color: isEndOfMonth
+                                    ? "var(--am)"
+                                    : "var(--pm)",
+                                }}
+                              >
+                                {isEndOfMonth ? "สิ้นเดือน" : "ต้นเดือน"}
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="p-1.5 sm:p-2 align-middle">
+                            <div className="max-w-[240px]">
+                              <ShiftChip shift={sp.shift} />
+                            </div>
+                          </td>
+
+                          <td className="p-1.5 sm:p-2.5 align-middle">
+                            <select
+                              aria-label={`เลือกทีมที่ว่างสำหรับ ${sp.shift.name} วันที่ ${sp.workDate}`}
+                              disabled={isPending}
+                              value={sp.assignedTeamId ?? ""}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                handleAssignSpecial(
+                                  sp.slotId,
+                                  sp.workDate,
+                                  val ? Number(val) : null
+                                );
+                              }}
+                              className="field w-full text-xs py-1.5 px-1.5 sm:px-2"
+                              style={{
+                                borderColor:
+                                  sp.assignedTeamId !== null
+                                    ? "rgba(62,207,142,0.6)"
+                                    : "var(--line)",
+                              }}
+                            >
+                              <option value="">
+                                — ทีมว่าง ({availableTeams.length}) —
+                              </option>
+                              {availableTeams.map((tr) => {
+                                const cell = tr.cells[sp.dayOfWeek];
+                                const isOff =
+                                  !cell.isWorkingRegularOrReplaced;
+                                return (
+                                  <option key={tr.team.id} value={tr.team.id}>
+                                    ทีม {tr.team.name}
+                                    {cell.wasOffByOverride
+                                      ? " (OD หยุด)"
+                                      : isOff
+                                        ? ""
+                                        : " (ติดกะ)"}
+                                  </option>
+                                );
+                              })}
+                            </select>
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        );
+      })()}
 
       {/* ==================== 2. MASTER-PLAN (ADMIN) ==================== */}
       {isAdmin && activeTab === "master" && (
         <section className="grid lg:grid-cols-[280px_1fr] gap-4">
           <div className="panel p-4">
-            <h2 className="font-semibold mb-3">เวอร์ชันของ Master-plan</h2>
+            <h2 className="font-semibold mb-2">เวอร์ชันของ Master-plan</h2>
             <p className="dim text-xs mb-3">
               แผนที่ระบุวันเริ่มใช้แล้วจะมีผลต่อเนื่องในสัปดาห์ต่อๆ ไปจนกว่าจะมีแผนเวอร์ชันใหม่
               (รองรับการเริ่มใช้กลางสัปดาห์)
             </p>
+
+            <button
+              type="button"
+              onClick={handleResetToNewPlan}
+              className="btn-ghost w-full text-xs py-2 mb-3 border cursor-pointer rounded-md transition"
+              style={{
+                borderColor: !editingPlan ? "var(--am)" : "var(--line)",
+                background: !editingPlan
+                  ? "rgba(242,179,61,0.12)"
+                  : "var(--panel2)",
+                color: !editingPlan ? "var(--am)" : "var(--ink)",
+                fontWeight: !editingPlan ? 600 : 400,
+              }}
+            >
+              + สร้าง Master-plan เวอร์ชันใหม่ (v
+              {store.masterPlans.reduce((m, p) => Math.max(m, p.version), 0) + 1}
+              )
+            </button>
+
             <ol className="space-y-2 text-sm">
               {[...store.masterPlans]
                 .sort((a, b) => b.version - a.version)
                 .map((p) => {
                   const isFuture = p.effectiveFrom > todayIso;
+                  const isSelected = editingPlanId === p.id;
                   return (
                     <li
                       key={p.id}
                       onClick={() => loadPlanIntoEditor(p.id)}
-                      className="p-3 rounded-md cursor-pointer"
-                      style={{ background: "var(--panel2)" }}
+                      className="p-3 rounded-md cursor-pointer transition border"
+                      style={{
+                        background: isSelected
+                          ? "var(--panel)"
+                          : "var(--panel2)",
+                        borderColor: isSelected
+                          ? "var(--am)"
+                          : "transparent",
+                      }}
                     >
                       <div className="flex justify-between items-center">
                         <b>Master-plan v{p.version}</b>
                         <span
-                          className="text-xs"
+                          className="text-xs px-1.5 py-0.5 rounded font-medium"
                           style={{
+                            background: isFuture
+                              ? "rgba(242,179,61,0.18)"
+                              : "rgba(62,207,142,0.18)",
                             color: isFuture ? "var(--am)" : "var(--ok)",
                           }}
                         >
@@ -1353,6 +2090,32 @@ export default function PlannerApp({
                       {p.note && (
                         <div className="dim text-xs mt-1">{p.note}</div>
                       )}
+                      <div
+                        className="flex items-center justify-between mt-2 pt-1.5 border-t text-[11px]"
+                        style={{ borderColor: "var(--line)" }}
+                      >
+                        <span className="dim">
+                          {isFuture
+                            ? isSelected
+                              ? "กำลังแก้ไข ✎"
+                              : "✎ คลิกเพื่อแก้ไขแผนนี้"
+                            : "คลิกเพื่อคัดลอกโครงร่าง"}
+                        </span>
+                        {isFuture && store.masterPlans.length > 1 && (
+                          <button
+                            type="button"
+                            disabled={isPending}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteFuturePlan(p.id, p.version);
+                            }}
+                            className="text-[11px] dim hover:text-red-400 cursor-pointer"
+                            title="ลบแผนที่ยังไม่เริ่มใช้นี้"
+                          >
+                            ลบแผน
+                          </button>
+                        )}
+                      </div>
                     </li>
                   );
                 })}
@@ -1360,22 +2123,67 @@ export default function PlannerApp({
           </div>
 
           <form onSubmit={handleSaveMasterPlan} className="panel p-4 space-y-4">
-            <div className="flex flex-wrap items-end justify-between gap-3">
+            {editingPlan ? (
+              <div
+                className="p-3 rounded-md border flex flex-wrap items-center justify-between gap-3"
+                style={{
+                  background: "rgba(242,179,61,0.08)",
+                  borderColor: "var(--am)",
+                }}
+              >
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="text-xs px-2 py-0.5 rounded font-semibold"
+                      style={{
+                        background: "var(--am)",
+                        color: "#000",
+                      }}
+                    >
+                      กำลังแก้ไข Master-plan v{editingPlan.version}
+                    </span>
+                    <span
+                      className="text-xs font-semibold"
+                      style={{ color: "var(--am)" }}
+                    >
+                      (สถานะ: รอเริ่มใช้งาน)
+                    </span>
+                  </div>
+                  <p className="dim text-xs mt-1">
+                    การบันทึกจะอัปเดตข้อมูลของ v{editingPlan.version} โดยตรง โดยไม่สร้างเวอร์ชันใหม่
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleResetToNewPlan}
+                  className="btn-ghost text-xs py-1 px-2.5 border"
+                  style={{ borderColor: "var(--line)" }}
+                >
+                  สลับเป็นสร้างเวอร์ชันใหม่ (v
+                  {store.masterPlans.reduce((m, p) => Math.max(m, p.version), 0) +
+                    1}
+                  ) →
+                </button>
+              </div>
+            ) : (
               <div>
-                <h2 className="font-semibold">
+                <h2 className="font-semibold text-base">
                   สร้าง Master-plan เวอร์ชันใหม่ (v
                   {store.masterPlans.reduce((m, p) => Math.max(m, p.version), 0) +
                     1}
                   )
                 </h2>
-                <p className="dim text-xs">
+                <p className="dim text-xs mt-0.5">
                   เลือกวันเริ่มใช้แผนได้ทุกวัน (รวมถึงกลางสัปดาห์)
                   ระบบจะสลับใช้แผนใหม่ตั้งแต่วันที่กำหนดโดยอัตโนมัติ
                 </p>
               </div>
+            )}
+
+            <div className="flex flex-wrap items-end justify-between gap-3">
               <div className="flex flex-wrap gap-3 text-sm">
                 <label>
-                  วันเริ่มใช้แผนใหม่
+                  {editingPlan ? "วันเริ่มใช้แผน (อนาคต)" : "วันเริ่มใช้แผนใหม่"}
                   <input
                     type="date"
                     required
@@ -1401,13 +2209,12 @@ export default function PlannerApp({
               <table className="schedule-grid w-full min-w-[780px] text-sm">
                 <thead>
                   <tr>
-                    <th className="p-2 text-left dim font-normal">ทีม / แถว</th>
+                    <th className="p-2 text-right dim font-normal">ทีม / แถว</th>
                     {THAI_DAYS_SHORT.map((d, idx) => (
                       <th key={idx} className="p-2 text-left dim font-normal">
                         {d}
                       </th>
                     ))}
-                    <th className="p-2 text-center dim font-normal">วันปกติ</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1415,12 +2222,11 @@ export default function PlannerApp({
                     .filter((t) => t.active)
                     .sort((a, b) => a.sortOrder - b.sortOrder)
                     .map((team) => {
-                      const daysWorked = Array.from({ length: 7 }, (_, dow) =>
-                        Boolean(mpGrid[`T${team.id}-${dow}`])
-                      ).filter(Boolean).length;
                       return (
                         <tr key={team.id}>
-                          <td className="p-2 font-semibold">ทีม {team.name}</td>
+                          <td className="p-2 font-semibold text-right">
+                            ทีม {team.name}
+                          </td>
                           {Array.from({ length: 7 }, (_, dow) => {
                             const key = `T${team.id}-${dow}`;
                             return (
@@ -1449,31 +2255,16 @@ export default function PlannerApp({
                               </td>
                             );
                           })}
-                          <td
-                            className="p-2 text-center mono font-semibold"
-                            style={{
-                              color:
-                                daysWorked === 5 ? "var(--ok)" : "var(--am)",
-                            }}
-                          >
-                            {daysWorked}
-                          </td>
                         </tr>
                       );
                     })}
 
                   {/* Individual CAM3 employee rows in Master-plan */}
                   {cam3Employees.map((emp) => {
-                    const daysWorked = Array.from({ length: 7 }, (_, dow) =>
-                      Boolean(mpGrid[`CAM3_${emp.id}-${dow}`])
-                    ).filter(Boolean).length;
                     return (
                       <tr key={`mp-cam3-${emp.id}`}>
-                        <td className="p-2">
-                          <div className="font-semibold">
-                            {emp.firstName} {emp.lastName}
-                          </div>
-                          <div className="dim text-xs">CAM3</div>
+                        <td className="p-2 font-semibold text-right">
+                          {emp.firstName} {emp.lastName}
                         </td>
                         {Array.from({ length: 7 }, (_, dow) => {
                           const key = `CAM3_${emp.id}-${dow}`;
@@ -1501,15 +2292,6 @@ export default function PlannerApp({
                             </td>
                           );
                         })}
-                        <td
-                          className="p-2 text-center mono font-semibold"
-                          style={{
-                            color:
-                              daysWorked === 5 ? "var(--ok)" : "var(--am)",
-                          }}
-                        >
-                          {daysWorked}
-                        </td>
                       </tr>
                     );
                   })}
@@ -1525,10 +2307,10 @@ export default function PlannerApp({
                     className="font-semibold text-sm"
                     style={{ color: "var(--tally)" }}
                   >
-                    กะพิเศษประจำใน Master-plan (ปกติ 2 กะต่อสัปดาห์)
+                    กะ OT ประจำใน Master-plan (ปกติ 2 กะต่อสัปดาห์)
                   </h3>
                   <p className="dim text-xs">
-                    ระบุเฉพาะวันและรูปแบบกะพิเศษ (ไม่ผูกทีมตายตัว)
+                    ระบุเฉพาะวันและรูปแบบกะ OT  (ไม่ผูกทีมตายตัว)
                     เพื่อให้รอจัดทีมหมุนเวียนในตารางประจำสัปดาห์
                   </p>
                 </div>
@@ -1546,7 +2328,7 @@ export default function PlannerApp({
                     ]);
                   }}
                 >
-                  + เพิ่มกะพิเศษประจำ
+                  + เพิ่มกะ OT ประจำ
                 </button>
               </div>
 
@@ -1614,11 +2396,53 @@ export default function PlannerApp({
               </div>
             </div>
 
-            <div className="flex justify-end pt-2">
-              <button type="submit" disabled={isPending} className="btn">
-                บันทึกเป็น Master-plan เวอร์ชันใหม่
-              </button>
-            </div>
+            {editingPlan ? (
+              <div
+                className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t"
+                style={{ borderColor: "var(--line)" }}
+              >
+                {store.masterPlans.length > 1 ? (
+                  <button
+                    type="button"
+                    disabled={isPending}
+                    onClick={() =>
+                      handleDeleteFuturePlan(editingPlan.id, editingPlan.version)
+                    }
+                    className="btn-ghost text-xs px-3 py-1.5 hover:text-red-400 cursor-pointer"
+                    style={{ color: "var(--tally)" }}
+                  >
+                    ลบแผน v{editingPlan.version} นี้
+                  </button>
+                ) : (
+                  <div />
+                )}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleResetToNewPlan}
+                    className="btn-ghost text-xs px-3 py-1.5 cursor-pointer"
+                  >
+                    ยกเลิก
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isPending}
+                    className="btn text-xs font-semibold px-4 py-2 cursor-pointer"
+                    style={{ background: "var(--am)", color: "#000" }}
+                  >
+                    บันทึกการแก้ไข Master-plan v{editingPlan.version}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex justify-end pt-2">
+                <button type="submit" disabled={isPending} className="btn">
+                  บันทึกเป็น Master-plan เวอร์ชันใหม่ (v
+                  {store.masterPlans.reduce((m, p) => Math.max(m, p.version), 0) + 1}
+                  )
+                </button>
+              </div>
+            )}
           </form>
         </section>
       )}
@@ -1676,7 +2500,7 @@ export default function PlannerApp({
                 className="field w-full mt-1"
               >
                 <option value="REPLACE">แทนที่กะเดิมของวันนั้น</option>
-                <option value="ADD">เพิ่มกะพิเศษเฉพาะกิจ (ทำงานเพิ่ม)</option>
+                <option value="ADD">เพิ่มกะ OT เฉพาะกิจ (ทำงานเพิ่ม)</option>
                 <option value="OFF">สั่งหยุดงาน (ยกเลิกกะวันนั้น)</option>
               </select>
             </label>
@@ -1787,15 +2611,15 @@ export default function PlannerApp({
                           {ov.mode === "REPLACE"
                             ? "แทนที่กะเดิม"
                             : ov.mode === "ADD"
-                            ? "เพิ่มกะ"
-                            : "หยุดงาน"}
+                              ? "เพิ่มกะ"
+                              : "หยุดงาน"}
                         </td>
                         <td className="mono">
                           {ov.mode === "OFF"
                             ? "— หยุด"
                             : st
-                            ? `${st.name} (${st.startTime}–${st.endTime})`
-                            : `${ov.customStart}–${ov.customEnd}`}
+                              ? `${st.name} (${st.startTime}–${st.endTime})`
+                              : `${ov.customStart}–${ov.customEnd}`}
                         </td>
                         <td className="dim">{ov.reason}</td>
                         <td className="text-right">
@@ -1807,7 +2631,7 @@ export default function PlannerApp({
                                 router.refresh();
                               })
                             }
-                            className="dim text-xs hover:text-white cursor-pointer"
+                            className="dim text-xs hover:opacity-80 cursor-pointer"
                           >
                             ลบ
                           </button>
@@ -1935,9 +2759,7 @@ export default function PlannerApp({
                       onClick={() => setShColor(c.key)}
                       className="flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-left cursor-pointer transition-colors"
                       style={{
-                        background: selected
-                          ? "rgba(255, 255, 255, 0.08)"
-                          : "var(--panel2)",
+                        background: selected ? `${c.hex}22` : "var(--panel2)",
                         border: selected
                           ? `1.5px solid ${c.hex}`
                           : "1px solid var(--line)",
@@ -2037,7 +2859,7 @@ export default function PlannerApp({
                                 : "var(--dim)",
                           }}
                         >
-                          {st.kind === "SPECIAL" ? "กะพิเศษ" : "กะปกติ"}
+                          {st.kind === "SPECIAL" ? "กะ OT " : "กะปกติ"}
                         </td>
                         <td className="mono">
                           {st.startTime}–{st.endTime}
@@ -2090,7 +2912,7 @@ export default function PlannerApp({
                                 router.refresh();
                               })
                             }
-                            className="dim text-xs hover:text-white cursor-pointer"
+                            className="dim text-xs hover:opacity-80 cursor-pointer"
                           >
                             ลบ
                           </button>
@@ -2230,6 +3052,7 @@ export default function PlannerApp({
           {/* Employee Management */}
           <div className="space-y-4">
             <form
+              ref={employeeFormRef}
               onSubmit={(e) => {
                 e.preventDefault();
                 startTransition(async () => {
@@ -2237,12 +3060,14 @@ export default function PlannerApp({
                     (p) => p.id === empPositionId
                   );
                   await saveEmployeeAction({
+                    id: editingEmpId ?? undefined,
                     firstName: empFirstName,
                     lastName: empLastName,
                     phone: empPhone,
                     positionId: empPositionId,
                     teamId: pos?.isSpecial ? null : empTeamId,
                   });
+                  setEditingEmpId(null);
                   setEmpFirstName("");
                   setEmpLastName("");
                   setEmpPhone("");
@@ -2250,7 +3075,39 @@ export default function PlannerApp({
                 });
               }}
               className="panel p-4 grid sm:grid-cols-6 gap-2.5 items-end text-sm"
+              style={{
+                borderColor: editingEmpId ? "var(--am)" : undefined,
+                background: editingEmpId ? "rgba(242,179,61,0.04)" : undefined,
+              }}
             >
+              {editingEmpId && (
+                <div
+                  className="sm:col-span-6 flex flex-wrap items-center justify-between gap-2 pb-2 mb-1 border-b"
+                  style={{ borderColor: "var(--line)" }}
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="text-xs px-2 py-0.5 rounded font-semibold"
+                      style={{
+                        background: "rgba(242,179,61,0.18)",
+                        color: "var(--am)",
+                      }}
+                    >
+                      โหมดแก้ไขข้อมูลพนักงาน
+                    </span>
+                    <span className="font-semibold text-xs sm:text-sm">
+                      {empFirstName} {empLastName}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCancelEditEmployee}
+                    className="btn-ghost text-xs py-0.5 px-2"
+                  >
+                    ยกเลิกการแก้ไข (สลับเป็นเพิ่มใหม่)
+                  </button>
+                </div>
+              )}
               <label className="sm:col-span-1">
                 ชื่อ
                 <input
@@ -2314,13 +3171,25 @@ export default function PlannerApp({
                   ))}
                 </select>
               </label>
-              <button
-                type="submit"
-                disabled={isPending}
-                className="btn sm:col-span-1"
-              >
-                + เพิ่มพนักงาน
-              </button>
+              <div className="sm:col-span-1 flex gap-1.5">
+                <button
+                  type="submit"
+                  disabled={isPending}
+                  className="btn flex-1 text-xs"
+                >
+                  {editingEmpId ? "บันทึกแก้ไข" : "+ เพิ่มพนักงาน"}
+                </button>
+                {editingEmpId && (
+                  <button
+                    type="button"
+                    onClick={handleCancelEditEmployee}
+                    className="btn-ghost text-xs px-2"
+                    title="ยกเลิกการแก้ไข"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
             </form>
 
             <div className="panel p-4 overflow-x-auto">
@@ -2372,8 +3241,14 @@ export default function PlannerApp({
                       return (
                         <tr
                           key={emp.id}
-                          className="border-t"
-                          style={{ borderColor: "var(--line)" }}
+                          className="border-t transition"
+                          style={{
+                            borderColor: "var(--line)",
+                            background:
+                              editingEmpId === emp.id
+                                ? "rgba(242,179,61,0.12)"
+                                : undefined,
+                          }}
                         >
                           <td className="py-2">
                             {emp.firstName} {emp.lastName}
@@ -2383,8 +3258,8 @@ export default function PlannerApp({
                               pos?.isLead
                                 ? "font-semibold"
                                 : pos?.isSpecial
-                                ? "font-semibold"
-                                : "dim"
+                                  ? "font-semibold"
+                                  : "dim"
                             }
                             style={{
                               color: pos?.isSpecial
@@ -2404,18 +3279,44 @@ export default function PlannerApp({
                           </td>
                           <td className="mono dim">{emp.phone}</td>
                           <td className="text-right">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                startTransition(async () => {
-                                  await removeEmployeeAction(emp.id);
-                                  router.refresh();
-                                })
-                              }
-                              className="dim text-xs hover:text-white cursor-pointer"
-                            >
-                              นำออก
-                            </button>
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleStartEditEmployee(emp)}
+                                className="text-xs px-2 py-0.5 rounded font-medium cursor-pointer border hover:opacity-90"
+                                style={{
+                                  borderColor:
+                                    editingEmpId === emp.id
+                                      ? "var(--am)"
+                                      : "var(--line)",
+                                  background:
+                                    editingEmpId === emp.id
+                                      ? "rgba(242,179,61,0.2)"
+                                      : "var(--panel2)",
+                                  color:
+                                    editingEmpId === emp.id
+                                      ? "var(--am)"
+                                      : "var(--ink)",
+                                }}
+                              >
+                                {editingEmpId === emp.id ? "กำลังแก้ไข" : "แก้ไข"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  startTransition(async () => {
+                                    if (editingEmpId === emp.id) {
+                                      handleCancelEditEmployee();
+                                    }
+                                    await removeEmployeeAction(emp.id);
+                                    router.refresh();
+                                  })
+                                }
+                                className="dim text-xs hover:opacity-80 cursor-pointer"
+                              >
+                                นำออก
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -2495,7 +3396,9 @@ export default function PlannerApp({
                   <table className="schedule-grid w-full min-w-[820px] text-sm">
                     <thead>
                       <tr>
-                        <th className="p-2 text-left dim font-normal">ทีม</th>
+                        <th className="p-2 text-right dim font-normal">
+                          ทีม / แถว
+                        </th>
                         {snap.data.days.map((d) => (
                           <th
                             key={d.date}
@@ -2504,13 +3407,12 @@ export default function PlannerApp({
                             {d.labelShort} <span className="mono">{d.dayNum}</span>
                           </th>
                         ))}
-                        <th className="p-2 text-center dim font-normal">วัน</th>
                       </tr>
                     </thead>
                     <tbody>
                       {snap.data.teamRows.map((tr) => (
                         <tr key={tr.team.id}>
-                          <td className="p-2 font-semibold">
+                          <td className="p-2 font-semibold text-right">
                             ทีม {tr.team.name}
                             <div className="dim text-xs font-normal">
                               {tr.leadName.split(" ")[0]}
@@ -2518,16 +3420,23 @@ export default function PlannerApp({
                           </td>
                           {groupConsecutiveCells(tr.cells).map((group) => {
                             const firstCell = group.cells[0];
+                            const hasExtras = group.cells.some(
+                              (c) =>
+                                c.addedShifts.length > 0 ||
+                                c.specialSlots.length > 0
+                            );
                             return (
                               <td
                                 key={firstCell.workDate}
                                 colSpan={group.span}
                                 className="p-1.5 space-y-1"
                               >
-                                <ShiftChip
-                                  shift={firstCell.baseShift}
-                                  spanDays={group.span}
-                                />
+                                {(firstCell.baseShift || !hasExtras) && (
+                                  <ShiftChip
+                                    shift={firstCell.baseShift}
+                                    spanDays={group.span}
+                                  />
+                                )}
                                 {group.cells.flatMap((c) =>
                                   c.addedShifts.map((a, i) => (
                                     <ShiftChip
@@ -2547,29 +3456,30 @@ export default function PlannerApp({
                               </td>
                             );
                           })}
-                          <td className="p-2 text-center mono">
-                            {tr.totalWorkDays}
-                          </td>
                         </tr>
                       ))}
                       {(snap.data.cam3Rows ?? []).map((cRow) => (
                         <tr key={`snap-cam3-${cRow.employee.id}`}>
-                          <td className="p-2 font-semibold">
+                          <td className="p-2 font-semibold text-right">
                             {cRow.employee.firstName} {cRow.employee.lastName}
-                            <div className="dim text-xs font-normal">CAM3</div>
                           </td>
                           {groupConsecutiveCells(cRow.cells).map((group) => {
                             const firstCell = group.cells[0];
+                            const hasExtras = group.cells.some(
+                              (c) => c.addedShifts.length > 0
+                            );
                             return (
                               <td
                                 key={firstCell.workDate}
                                 colSpan={group.span}
                                 className="p-1.5 space-y-1"
                               >
-                                <ShiftChip
-                                  shift={firstCell.baseShift}
-                                  spanDays={group.span}
-                                />
+                                {(firstCell.baseShift || !hasExtras) && (
+                                  <ShiftChip
+                                    shift={firstCell.baseShift}
+                                    spanDays={group.span}
+                                  />
+                                )}
                                 {group.cells.flatMap((c) =>
                                   c.addedShifts.map((a, i) => (
                                     <ShiftChip
@@ -2581,9 +3491,6 @@ export default function PlannerApp({
                               </td>
                             );
                           })}
-                          <td className="p-2 text-center mono">
-                            {cRow.totalWorkDays}
-                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -2610,7 +3517,7 @@ export default function PlannerApp({
               <button
                 type="button"
                 onClick={() => setShowLoginModal(false)}
-                className="dim hover:text-white cursor-pointer"
+                className="dim hover:opacity-80 cursor-pointer"
               >
                 ✕
               </button>

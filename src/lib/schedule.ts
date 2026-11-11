@@ -289,6 +289,10 @@ export function subtractMonths(iso: string, months: number): string {
   return formatIsoDate(d);
 }
 
+export function getDaysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
 /**
  * Normalizes any YYYY-MM-DD date to the Sunday that starts its week (dayOfWeek = 0).
  */
@@ -361,9 +365,14 @@ export function getFairnessStats(
   rangeEnd: string;
   stats: FairnessTeamStat[];
 } {
-  const rangeStart = subtractMonths(todayIso, periodMonths);
-  const rangeEnd = todayIso;
+  const year = todayIso.slice(0, 4);
+  const isFullYear = periodMonths === 12;
+  const rangeStart = isFullYear
+    ? `${year}-01-01`
+    : subtractMonths(todayIso, periodMonths);
+  const rangeEnd = isFullYear ? `${year}-12-31` : todayIso;
   const weekEndIso = addDays(weekStartIso, 6);
+  const plannedEndIso = isFullYear ? rangeEnd : weekEndIso;
   const activeTeams = store.teams
     .filter((t) => t.active)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
@@ -373,7 +382,8 @@ export function getFairnessStats(
       (a) =>
         a.teamId === team.id &&
         a.workDate >= rangeStart &&
-        a.workDate <= todayIso
+        a.workDate <= todayIso &&
+        a.workDate <= rangeEnd
     ).length;
 
     const overrideAddedDone = store.overrides.filter(
@@ -382,14 +392,15 @@ export function getFairnessStats(
         o.teamId === team.id &&
         o.mode === "ADD" &&
         o.workDate >= rangeStart &&
-        o.workDate <= todayIso
+        o.workDate <= todayIso &&
+        o.workDate <= rangeEnd
     ).length;
 
     const plannedSpecialAfterToday = store.specialAssignments.filter(
       (a) =>
         a.teamId === team.id &&
-        a.workDate >= weekStartIso &&
-        a.workDate <= weekEndIso &&
+        a.workDate >= (isFullYear ? rangeStart : weekStartIso) &&
+        a.workDate <= plannedEndIso &&
         a.workDate > todayIso
     ).length;
 
@@ -398,8 +409,8 @@ export function getFairnessStats(
         !o.isCam3 &&
         o.teamId === team.id &&
         o.mode === "ADD" &&
-        o.workDate >= weekStartIso &&
-        o.workDate <= weekEndIso &&
+        o.workDate >= (isFullYear ? rangeStart : weekStartIso) &&
+        o.workDate <= plannedEndIso &&
         o.workDate > todayIso
     ).length;
 
@@ -419,34 +430,31 @@ export function getFairnessStats(
   };
 }
 
-export function resolveWeek(
+interface ScheduleDayWithPlan {
+  dayOfWeek: number;
+  date: string;
+  labelShort: string;
+  dayNum: number;
+  planVersion: number;
+  plan: MasterPlanRecord | null;
+}
+
+export type ResolvedMonth = ResolvedWeek;
+
+function resolveScheduleForDays(
   store: PlannerStoreData,
-  inputDateIso: string,
+  days: ScheduleDayWithPlan[],
+  rangeStart: string,
+  rangeEnd: string,
   todayIso: string,
-  periodMonths: FairnessPeriod = 3
+  periodMonths: FairnessPeriod
 ): ResolvedWeek {
-  const weekStart = getSundayOfWeek(inputDateIso);
-  const weekEnd = addDays(weekStart, 6);
   const shiftMap = new Map(store.shiftTypes.map((s) => [s.id, s]));
   const posMap = new Map(store.positions.map((p) => [p.id, p]));
   const activeTeams = store.teams
     .filter((t) => t.active)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
   const teamMap = new Map(store.teams.map((t) => [t.id, t]));
-
-  const days = Array.from({ length: 7 }, (_, dayOfWeek) => {
-    const date = addDays(weekStart, dayOfWeek);
-    const plan = getPlanForDate(store.masterPlans, date);
-    const dayNum = Number(date.slice(8, 10));
-    return {
-      dayOfWeek,
-      date,
-      labelShort: THAI_DAYS_SHORT[dayOfWeek],
-      dayNum,
-      planVersion: plan?.version ?? 1,
-      plan,
-    };
-  });
 
   const planVersionsMap = new Map<
     number,
@@ -463,12 +471,13 @@ export function resolveWeek(
   }
 
   function resolveEntityCell(
-    dayOfWeek: number,
+    dayIndex: number,
     teamId: number | null,
     isCam3: boolean,
     employeeId?: number
   ): ResolvedCell {
-    const d = days[dayOfWeek];
+    const d = days[dayIndex];
+    const dayOfWeek = d.dayOfWeek;
     const plan = d.plan;
     const hasPerEmployeeCam3 = Boolean(
       isCam3 && plan?.entries.some((e) => e.isCam3 && e.employeeId != null)
@@ -568,41 +577,44 @@ export function resolveWeek(
   // First build cells for all teams
   const teamCellsMap = new Map<number, ResolvedCell[]>();
   for (const team of activeTeams) {
-    const cells = Array.from({ length: 7 }, (_, dow) =>
-      resolveEntityCell(dow, team.id, false)
+    const cells = Array.from({ length: days.length }, (_, dayIndex) =>
+      resolveEntityCell(dayIndex, team.id, false)
     );
     teamCellsMap.set(team.id, cells);
   }
 
   // Resolve special slots for each day from that day's effective Master-plan
   const specialSlotsByDay: ResolvedSpecialSlot[][] = Array.from(
-    { length: 7 },
+    { length: days.length },
     () => []
   );
 
-  // Count how many special slots each team is assigned in this week
-  const weeklyTeamSpecialCount = new Map<number, number>();
-  for (let dow = 0; dow < 7; dow++) {
-    const d = days[dow];
+  // Count how many special slots each team is assigned in the same week (Sunday-Saturday)
+  const teamWeekSpecialCount = new Map<string, number>();
+  for (let dayIndex = 0; dayIndex < days.length; dayIndex++) {
+    const d = days[dayIndex];
+    const weekKey = getSundayOfWeek(d.date);
     const slotsForDay =
-      d.plan?.specialSlots.filter((s) => s.dayOfWeek === dow) ?? [];
+      d.plan?.specialSlots.filter((s) => s.dayOfWeek === d.dayOfWeek) ?? [];
     for (const slot of slotsForDay) {
       const assignment = store.specialAssignments.find(
         (a) => a.slotId === slot.id && a.workDate === d.date
       );
       if (assignment) {
-        weeklyTeamSpecialCount.set(
-          assignment.teamId,
-          (weeklyTeamSpecialCount.get(assignment.teamId) ?? 0) + 1
+        const teamWeekKey = `${assignment.teamId}_${weekKey}`;
+        teamWeekSpecialCount.set(
+          teamWeekKey,
+          (teamWeekSpecialCount.get(teamWeekKey) ?? 0) + 1
         );
       }
     }
   }
 
-  for (let dow = 0; dow < 7; dow++) {
-    const d = days[dow];
+  for (let dayIndex = 0; dayIndex < days.length; dayIndex++) {
+    const d = days[dayIndex];
+    const weekKey = getSundayOfWeek(d.date);
     const slotsForDay =
-      d.plan?.specialSlots.filter((s) => s.dayOfWeek === dow) ?? [];
+      d.plan?.specialSlots.filter((s) => s.dayOfWeek === d.dayOfWeek) ?? [];
     for (const slot of slotsForDay) {
       const st = shiftMap.get(slot.shiftTypeId);
       if (!st) continue;
@@ -615,17 +627,18 @@ export function resolveWeek(
       const teamCells = assignedTeam
         ? teamCellsMap.get(assignedTeam.id)
         : undefined;
-      const targetCell = teamCells?.[dow];
+      const targetCell = teamCells?.[dayIndex];
       const overlapWarning = Boolean(
         targetCell && targetCell.isWorkingRegularOrReplaced
       );
+      const teamWeekKey = assignedTeam ? `${assignedTeam.id}_${weekKey}` : "";
       const multipleSpecialWarning = assignedTeam
-        ? (weeklyTeamSpecialCount.get(assignedTeam.id) ?? 0) > 1
+        ? (teamWeekSpecialCount.get(teamWeekKey) ?? 0) > 1
         : false;
 
       const resolvedSlot: ResolvedSpecialSlot = {
         slotId: slot.id,
-        dayOfWeek: dow,
+        dayOfWeek: d.dayOfWeek,
         workDate: d.date,
         shift: toShiftBadge(st),
         assignedTeamId: assignedTeam?.id ?? null,
@@ -634,7 +647,7 @@ export function resolveWeek(
         multipleSpecialWarning,
       };
 
-      specialSlotsByDay[dow].push(resolvedSlot);
+      specialSlotsByDay[dayIndex].push(resolvedSlot);
       if (targetCell) {
         targetCell.specialSlots.push(resolvedSlot);
       }
@@ -694,8 +707,8 @@ export function resolveWeek(
     .sort((a, b) => a.id - b.id);
 
   const cam3Rows: ResolvedCam3Row[] = cam3Members.map((employee) => {
-    const cells = Array.from({ length: 7 }, (_, dow) =>
-      resolveEntityCell(dow, null, true, employee.id)
+    const cells = Array.from({ length: days.length }, (_, dayIndex) =>
+      resolveEntityCell(dayIndex, null, true, employee.id)
     );
     const totalWorkDays = cells.reduce(
       (acc, c) => acc + (c.baseShift ? 1 : 0) + c.addedShifts.length,
@@ -710,8 +723,8 @@ export function resolveWeek(
 
   const cam3Cells =
     cam3Rows[0]?.cells ??
-    Array.from({ length: 7 }, (_, dow) =>
-      resolveEntityCell(dow, null, true)
+    Array.from({ length: days.length }, (_, dayIndex) =>
+      resolveEntityCell(dayIndex, null, true)
     );
 
   const cam3TotalDays = cam3Cells.reduce(
@@ -725,14 +738,14 @@ export function resolveWeek(
 
   const fairness = getFairnessStats(
     store,
-    weekStart,
+    rangeStart,
     todayIso,
     periodMonths
   );
 
   return {
-    weekStart,
-    weekEnd,
+    weekStart: rangeStart,
+    weekEnd: rangeEnd,
     days: days.map(({ plan: _plan, ...rest }) => rest),
     planVersionsUsed: Array.from(planVersionsMap.values()),
     teamRows,
@@ -747,6 +760,77 @@ export function resolveWeek(
     unassignedSpecialCount,
     fairness,
   };
+}
+
+export function resolveWeek(
+  store: PlannerStoreData,
+  inputDateIso: string,
+  todayIso: string,
+  periodMonths: FairnessPeriod = 3
+): ResolvedWeek {
+  const weekStart = getSundayOfWeek(inputDateIso);
+  const weekEnd = addDays(weekStart, 6);
+
+  const days: ScheduleDayWithPlan[] = Array.from({ length: 7 }, (_, dayOfWeek) => {
+    const date = addDays(weekStart, dayOfWeek);
+    const plan = getPlanForDate(store.masterPlans, date);
+    const dayNum = Number(date.slice(8, 10));
+    return {
+      dayOfWeek,
+      date,
+      labelShort: THAI_DAYS_SHORT[dayOfWeek],
+      dayNum,
+      planVersion: plan?.version ?? 1,
+      plan,
+    };
+  });
+
+  return resolveScheduleForDays(
+    store,
+    days,
+    weekStart,
+    weekEnd,
+    todayIso,
+    periodMonths
+  );
+}
+
+export function resolveMonth(
+  store: PlannerStoreData,
+  yearMonthOrDateIso: string,
+  todayIso: string,
+  periodMonths: FairnessPeriod = 12
+): ResolvedWeek {
+  const ym = yearMonthOrDateIso.slice(0, 7);
+  const [year, month] = ym.split("-").map(Number);
+  const numDays = getDaysInMonth(year, month);
+  const monthStart = `${ym}-01`;
+  const monthEnd = `${ym}-${String(numDays).padStart(2, "0")}`;
+
+  const days: ScheduleDayWithPlan[] = Array.from({ length: numDays }, (_, index) => {
+    const dayNum = index + 1;
+    const date = `${ym}-${String(dayNum).padStart(2, "0")}`;
+    const d = parseIsoDate(date);
+    const dayOfWeek = d.getUTCDay();
+    const plan = getPlanForDate(store.masterPlans, date);
+    return {
+      dayOfWeek,
+      date,
+      labelShort: THAI_DAYS_SHORT[dayOfWeek],
+      dayNum,
+      planVersion: plan?.version ?? 1,
+      plan,
+    };
+  });
+
+  return resolveScheduleForDays(
+    store,
+    days,
+    monthStart,
+    monthEnd,
+    todayIso,
+    periodMonths
+  );
 }
 
 /**

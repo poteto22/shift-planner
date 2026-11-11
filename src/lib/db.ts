@@ -23,11 +23,33 @@ export function getBangkokTodayIso(): string {
   return `${y}-${m}-${d}`;
 }
 
+function ensureDefaultPositions(store: PlannerStoreData): boolean {
+  let changed = false;
+  if (!store.positions.some((p) => p.name === "CAM3-กะปกติ")) {
+    const nextId = store.positions.reduce((m, p) => Math.max(m, p.id), 0) + 1;
+    const nextSort =
+      store.positions.reduce((m, p) => Math.max(m, p.sortOrder), 0) + 1;
+    store.positions.push({
+      id: nextId,
+      name: "CAM3-กะปกติ",
+      sortOrder: nextSort,
+      isLead: false,
+      isSpecial: false,
+    });
+    changed = true;
+  }
+  return changed;
+}
+
 function readLocalFileStore(): PlannerStoreData {
   try {
     if (fs.existsSync(LOCAL_STORE_PATH)) {
       const raw = fs.readFileSync(LOCAL_STORE_PATH, "utf8");
-      return JSON.parse(raw) as PlannerStoreData;
+      const store = JSON.parse(raw) as PlannerStoreData;
+      if (ensureDefaultPositions(store)) {
+        writeLocalFileStore(store);
+      }
+      return store;
     }
   } catch {
     // Fallback to initial seed data if file is corrupted
@@ -152,6 +174,11 @@ async function syncStoreToPostgres(
     });
   }
 
+  const planIds = store.masterPlans.map((p) => p.id);
+  await prisma.masterPlan.deleteMany({
+    where: planIds.length > 0 ? { id: { notIn: planIds } } : {},
+  });
+
   for (const plan of store.masterPlans) {
     await prisma.masterPlan.upsert({
       where: { id: plan.id },
@@ -182,6 +209,14 @@ async function syncStoreToPostgres(
         })),
       });
     }
+
+    const currentSlotIds = plan.specialSlots.map((s) => s.id);
+    await prisma.specialSlot.deleteMany({
+      where: {
+        planId: plan.id,
+        ...(currentSlotIds.length > 0 ? { id: { notIn: currentSlotIds } } : {}),
+      },
+    });
 
     for (const slot of plan.specialSlots) {
       await prisma.specialSlot.upsert({
@@ -281,8 +316,7 @@ async function tryLoadFromPostgres(): Promise<PlannerStoreData | null> {
       prisma.override.findMany({ orderBy: { id: "asc" } }),
       prisma.weekSnapshot.findMany({ orderBy: { weekStart: "desc" } }),
     ]);
-    await prisma.$disconnect();
-    return {
+    const storeData: PlannerStoreData = {
       teams,
       positions,
       employees,
@@ -319,6 +353,11 @@ async function tryLoadFromPostgres(): Promise<PlannerStoreData | null> {
         finalizedAt: s.finalizedAt.toISOString(),
       })),
     };
+    if (ensureDefaultPositions(storeData)) {
+      await syncStoreToPostgres(prisma, storeData);
+    }
+    await prisma.$disconnect();
+    return storeData;
   } catch {
     return null;
   }

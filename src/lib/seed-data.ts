@@ -17,6 +17,7 @@ export function createInitialSeedData(): PlannerStoreData {
     { id: 5, name: "CAM 1 : CCU : Lighting", sortOrder: 5, isLead: false, isSpecial: false },
     { id: 6, name: "CAM 2", sortOrder: 6, isLead: false, isSpecial: false },
     { id: 7, name: "CAM3", sortOrder: 7, isLead: false, isSpecial: true },
+    { id: 8, name: "CAM3-กะปกติ", sortOrder: 8, isLead: false, isSpecial: false },
   ];
 
   return {
